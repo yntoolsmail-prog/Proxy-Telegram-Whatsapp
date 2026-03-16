@@ -394,13 +394,10 @@ try:
 except ImportError:
     PROXY_ENABLED = False
 '''
-lines = src.split('\n')
-last_import = 0
-for i, line in enumerate(lines):
-    if line.startswith('import ') or line.startswith('from '):
-        last_import = i
-lines.insert(last_import + 1, addon_import)
-src = '\n'.join(lines)
+# Вставляем после закрывающей ) многострочного импорта telegram.ext
+idx = src.find('from telegram.ext import (')
+close = src.find('\n)', idx)
+src = src[:close+2] + addon_import + src[close+2:]
 
 # 2) Кнопка в admin-меню
 old = '[InlineKeyboardButton("💾 Бэкап",                callback_data="backup")],'
