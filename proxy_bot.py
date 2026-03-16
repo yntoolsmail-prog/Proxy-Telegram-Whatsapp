@@ -1,0 +1,684 @@
+#!/usr/bin/env python3
+# Version: 1.0
+# proxy_bot.py — MTProxy + SOCKS5 + WhatsApp прокси
+# Режим: standalone (свой токен) или addon (импорт в bot.py)
+
+import os, subprocess, time, secrets, logging
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    ContextTypes, ConversationHandler, MessageHandler, filters
+)
+
+PROXY_CONF    = "/etc/proxy-bot/proxy_bot.env"
+MTP_DIR       = "/opt/mtproxy"
+MTP_BIN       = f"{MTP_DIR}/objs/bin/mtproto-proxy"
+MTP_SECRET_F  = f"{MTP_DIR}/proxy-secret"
+MTP_MULTI_F   = f"{MTP_DIR}/proxy-multi.conf"
+MTP_SERVICE   = "mtproxy"
+SOCKS_SERVICE = "microsocks"
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+WAIT_SOCKS_PORT = 31
+WAIT_SOCKS_PASS = 32
+
+# ══════════════════════════════════════════════════════════════════════════════
+# КОНФИГ
+# ══════════════════════════════════════════════════════════════════════════════
+
+def load_conf() -> dict:
+    conf = {}
+    try:
+        with open(PROXY_CONF) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    conf[k.strip()] = v.strip()
+    except:
+        pass
+    return conf
+
+def save_conf(data: dict):
+    os.makedirs(os.path.dirname(PROXY_CONF), exist_ok=True)
+    existing = load_conf()
+    existing.update(data)
+    with open(PROXY_CONF, "w") as f:
+        for k, v in existing.items():
+            f.write(f"{k}={v}\n")
+    os.chmod(PROXY_CONF, 0o600)
+
+def get_server_ip() -> str:
+    conf = load_conf()
+    if conf.get("SERVER_IP"):
+        return conf["SERVER_IP"]
+    try:
+        with open("/etc/amnezia/amneziawg/server.env") as f:
+            for line in f:
+                if line.startswith("SERVER_IP="):
+                    return line.split("=", 1)[1].strip()
+    except:
+        pass
+    try:
+        return subprocess.check_output(
+            ["curl", "-sf", "--max-time", "5", "https://api.ipify.org"], text=True
+        ).strip()
+    except:
+        return "—"
+
+def setup_interactive():
+    R='\033[0;31m'; G='\033[0;32m'; C='\033[0;36m'; B='\033[1m'; NC='\033[0m'
+    print(f"\n{C}{B}{'='*50}{NC}")
+    print(f"{C}{B}   Proxy Bot — Первичная настройка{NC}")
+    print(f"{C}{B}{'='*50}{NC}\n")
+    while True:
+        token = input("  Вставьте токен бота: ").strip()
+        if ":" in token and len(token) > 20:
+            break
+        print(f"  {R}Неверный формат токена{NC}")
+    while True:
+        admin_id = input("  Вставьте ваш Telegram ID: ").strip()
+        if admin_id.isdigit():
+            break
+        print(f"  {R}ID должен быть числом{NC}")
+    print("  Определяю IP...", end="", flush=True)
+    try:
+        ip = subprocess.check_output(
+            ["curl", "-sf", "--max-time", "5", "https://api.ipify.org"], text=True
+        ).strip()
+        print(f" {ip}")
+    except:
+        print()
+        ip = input("  Введите IP сервера: ").strip()
+    save_conf({"BOT_TOKEN": token, "ADMIN_ID": admin_id, "SERVER_IP": ip, "MODE": "standalone"})
+    print(f"\n  {G}Готово!{NC}\n")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ОБЩИЕ ХЕЛПЕРЫ
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _svc_action(service: str, action: str, ok_msg: str) -> tuple[bool, str]:
+    try:
+        r = subprocess.run(["systemctl", action, service],
+                           capture_output=True, text=True, timeout=15)
+        if r.returncode == 0:
+            return True, ok_msg
+        return False, f"❌ Ошибка: {r.stderr.strip() or f'journalctl -u {service}'}"
+    except Exception as e:
+        return False, f"❌ {e}"
+
+def _svc_status(service: str) -> dict:
+    try:
+        active = subprocess.check_output(
+            ["systemctl", "is-active", service],
+            text=True, stderr=subprocess.DEVNULL
+        ).strip() == "active"
+    except:
+        active = False
+    uptime_str = ""
+    if active:
+        try:
+            import datetime
+            raw = subprocess.check_output(
+                ["systemctl", "show", service, "--property=ActiveEnterTimestamp", "--value"],
+                text=True
+            ).strip()
+            parts = raw.split()
+            if len(parts) >= 3:
+                started = datetime.datetime.strptime(f"{parts[1]} {parts[2]}", "%Y-%m-%d %H:%M:%S")
+                delta = datetime.datetime.utcnow() - started
+                h, r = divmod(int(delta.total_seconds()), 3600)
+                uptime_str = f"{h}ч {r // 60}м"
+        except:
+            pass
+    return {"running": active, "uptime": uptime_str}
+
+def _status_line(running: bool, uptime: str) -> str:
+    icon = "🟢 Работает" if running else "🔴 Остановлен"
+    return f"{icon}{f' ({uptime})' if uptime else ''}"
+
+def _toggle_btn(running: bool, cb_stop: str, cb_start: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(
+        "⏹ Остановить" if running else "▶️ Запустить",
+        callback_data=cb_stop if running else cb_start
+    )
+
+def _back_kb(target="proxy_menu"):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data=target)]])
+
+def server_stats() -> str:
+    lines = []
+    try:
+        secs = float(open("/proc/uptime").read().split()[0])
+        d, r = divmod(int(secs), 86400); h, r = divmod(r, 3600)
+        lines.append(f"⏱ Аптайм: {d}д {h}ч {r // 60}м")
+    except: pass
+    try:
+        la = open("/proc/loadavg").read().split()[:3]
+        lines.append(f"⚙️ Load avg: {' '.join(la)}")
+    except: pass
+    try:
+        mem = {}
+        for line in open("/proc/meminfo"):
+            k = line.split()[0].rstrip(":")
+            if k in ("MemTotal", "MemAvailable"):
+                mem[k] = int(line.split()[1])
+        total = mem.get("MemTotal", 0) // 1024
+        used  = total - mem.get("MemAvailable", 0) // 1024
+        lines.append(f"🧠 RAM: {used} / {total} MB ({round(used/total*100) if total else 0}%)")
+    except: pass
+    try:
+        p = subprocess.check_output(["df", "-h", "/"], text=True).splitlines()[1].split()
+        lines.append(f"💾 Диск: {p[2]} / {p[1]} ({p[4]})")
+    except: pass
+    return "\n".join(lines)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MTPROXY
+# ══════════════════════════════════════════════════════════════════════════════
+
+def mtp_installed() -> bool:
+    return os.path.exists(MTP_BIN)
+
+def mtp_get_secret() -> str: return load_conf().get("MTP_SECRET", "")
+def mtp_get_port()   -> str: return load_conf().get("MTP_PORT", "443")
+
+def mtp_build_link(secret: str, port: str, ip: str) -> str:
+    return f"https://t.me/proxy?server={ip}&port={port}&secret={secret}"
+
+def mtp_generate_secret(fake_tls: bool = True) -> str:
+    raw = secrets.token_hex(16)
+    return ("dd" + raw) if fake_tls else raw
+
+def mtp_update_tg_configs() -> tuple[bool, str]:
+    try:
+        r1 = subprocess.run(["curl", "-sf", "--max-time", "15",
+            "https://core.telegram.org/getProxySecret", "-o", MTP_SECRET_F],
+            capture_output=True, timeout=20)
+        r2 = subprocess.run(["curl", "-sf", "--max-time", "15",
+            "https://core.telegram.org/getProxyConfig", "-o", MTP_MULTI_F],
+            capture_output=True, timeout=20)
+        if r1.returncode == 0 and r2.returncode == 0:
+            return True, "✅ Конфиги Telegram обновлены"
+        return False, "❌ Не удалось скачать конфиги"
+    except Exception as e:
+        return False, f"❌ {e}"
+
+def _write_mtp_service(port: str, secret: str):
+    with open(f"/etc/systemd/system/{MTP_SERVICE}.service", "w") as f:
+        f.write(
+            f"[Unit]\nDescription=MTProxy for Telegram\n"
+            f"After=network-online.target\nWants=network-online.target\n\n"
+            f"[Service]\n"
+            f"ExecStartPre=/bin/sh -c 'curl -sf https://core.telegram.org/getProxySecret"
+            f" -o {MTP_SECRET_F}; curl -sf https://core.telegram.org/getProxyConfig"
+            f" -o {MTP_MULTI_F}'\n"
+            f"ExecStart={MTP_BIN} -u nobody -p 8888 -H {port} -S {secret}"
+            f" --aes-pwd {MTP_SECRET_F} {MTP_MULTI_F} -M 1\n"
+            f"Restart=on-failure\nRestartSec=10\n"
+            f"StandardOutput=journal\nStandardError=journal\n\n"
+            f"[Install]\nWantedBy=multi-user.target\n"
+        )
+    subprocess.run(["systemctl", "daemon-reload"])
+
+def mtp_apply_secret(new_secret: str) -> tuple[bool, str]:
+    save_conf({"MTP_SECRET": new_secret})
+    _write_mtp_service(mtp_get_port(), new_secret)
+    return _svc_action(MTP_SERVICE, "restart", "🔄 MTProxy перезапущен с новым секретом")
+
+def mtp_start()   -> tuple[bool, str]: return _svc_action(MTP_SERVICE, "start",   "▶️ MTProxy запущен")
+def mtp_stop()    -> tuple[bool, str]: return _svc_action(MTP_SERVICE, "stop",    "⏹ MTProxy остановлен")
+def mtp_restart() -> tuple[bool, str]: return _svc_action(MTP_SERVICE, "restart", "🔄 MTProxy перезапущен")
+
+async def show_mtp_menu(query):
+    if not mtp_installed():
+        await query.edit_message_text(
+            "⚫ MTProxy не установлен.\n\n"
+            "Запустите:\n`bash <(curl -s https://raw.githubusercontent.com/"
+            "yntoolsmail-prog/Proxy-Telegram-Whatsapp/main/setup_proxy.sh)`",
+            reply_markup=_back_kb(), parse_mode="Markdown"
+        )
+        return
+    st     = _svc_status(MTP_SERVICE)
+    secret = mtp_get_secret()
+    port   = mtp_get_port()
+    ip     = get_server_ip()
+    link   = mtp_build_link(secret, port, ip) if secret and ip != "—" else "—"
+    mode   = "fake-TLS" if secret.startswith("dd") else "plain"
+    await query.edit_message_text(
+        f"📡 MTProxy\n\n"
+        f"Статус: {_status_line(st['running'], st['uptime'])}\n"
+        f"🌐 {ip}:{port}  |  🔑 {mode}\n\n"
+        f"🔗 Ссылка:\n`{link}`\n\n"
+        f"_Telegram → Настройки → Данные → Тип соединения_",
+        reply_markup=InlineKeyboardMarkup([
+            [_toggle_btn(st["running"], "proxy_mtp_stop", "proxy_mtp_start"),
+             InlineKeyboardButton("🔄 Рестарт",           callback_data="proxy_mtp_restart")],
+            [InlineKeyboardButton("🔑 Сменить секрет",    callback_data="proxy_mtp_secret_ask")],
+            [InlineKeyboardButton("📥 Обновить конфиги TG", callback_data="proxy_mtp_update_cfg")],
+            [InlineKeyboardButton("🔄 Обновить",          callback_data="proxy_mtp_menu")],
+            [InlineKeyboardButton("◀️ Назад",             callback_data="proxy_menu")],
+        ]),
+        parse_mode="Markdown"
+    )
+
+async def show_mtp_secret_ask(query):
+    await query.edit_message_text(
+        "🔑 Смена секрета MTProxy\n\n"
+        "После смены все подключения оборвутся.\n\n"
+        "*fake-TLS* — маскировка под HTTPS (рекомендуется).\n"
+        "*plain* — без маскировки.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔐 fake-TLS (рекомендуется)", callback_data="proxy_mtp_secret_faketls")],
+            [InlineKeyboardButton("🔑 plain",                    callback_data="proxy_mtp_secret_plain")],
+            [InlineKeyboardButton("❌ Отмена",                   callback_data="proxy_mtp_menu")],
+        ]),
+        parse_mode="Markdown"
+    )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SOCKS5
+# ══════════════════════════════════════════════════════════════════════════════
+
+def socks_installed() -> bool:
+    return os.path.exists("/usr/local/bin/microsocks")
+
+def socks_get_port() -> str: return load_conf().get("SOCKS_PORT", "1080")
+def socks_get_user() -> str: return load_conf().get("SOCKS_USER", "")
+def socks_get_pass() -> str: return load_conf().get("SOCKS_PASS", "")
+
+def socks_build_link(port: str, ip: str, user: str = "", pwd: str = "") -> str:
+    return f"socks5://{user}:{pwd}@{ip}:{port}" if user and pwd else f"socks5://{ip}:{port}"
+
+def _write_socks_service(port: str, user: str, pwd: str):
+    auth = f"-u {user} -P {pwd}" if user and pwd else ""
+    with open(f"/etc/systemd/system/{SOCKS_SERVICE}.service", "w") as f:
+        f.write(
+            f"[Unit]\nDescription=SOCKS5 Proxy (microsocks)\n"
+            f"After=network-online.target\nWants=network-online.target\n\n"
+            f"[Service]\nExecStart=/usr/local/bin/microsocks -p {port} {auth}\n"
+            f"Restart=on-failure\nRestartSec=10\n"
+            f"StandardOutput=journal\nStandardError=journal\n\n"
+            f"[Install]\nWantedBy=multi-user.target\n"
+        )
+    subprocess.run(["systemctl", "daemon-reload"])
+
+def socks_apply(port: str, user: str, pwd: str) -> tuple[bool, str]:
+    save_conf({"SOCKS_PORT": port, "SOCKS_USER": user, "SOCKS_PASS": pwd})
+    _write_socks_service(port, user, pwd)
+    return _svc_action(SOCKS_SERVICE, "restart", "🔄 SOCKS5 перезапущен")
+
+def socks_start()   -> tuple[bool, str]: return _svc_action(SOCKS_SERVICE, "start",   "▶️ SOCKS5 запущен")
+def socks_stop()    -> tuple[bool, str]: return _svc_action(SOCKS_SERVICE, "stop",    "⏹ SOCKS5 остановлен")
+def socks_restart() -> tuple[bool, str]: return _svc_action(SOCKS_SERVICE, "restart", "🔄 SOCKS5 перезапущен")
+
+async def show_socks_menu(query):
+    if not socks_installed():
+        await query.edit_message_text(
+            "⚫ SOCKS5 не установлен.\n\n"
+            "Запустите:\n`bash <(curl -s https://raw.githubusercontent.com/"
+            "yntoolsmail-prog/Proxy-Telegram-Whatsapp/main/setup_proxy.sh)`",
+            reply_markup=_back_kb(), parse_mode="Markdown"
+        )
+        return
+    st   = _svc_status(SOCKS_SERVICE)
+    port = socks_get_port()
+    user = socks_get_user()
+    pwd  = socks_get_pass()
+    ip   = get_server_ip()
+    link = socks_build_link(port, ip, user, pwd)
+    await query.edit_message_text(
+        f"🧦 SOCKS5\n\n"
+        f"Статус: {_status_line(st['running'], st['uptime'])}\n"
+        f"🌐 {ip}:{port}\n"
+        f"{'👤 Логин: ' + user if user else '🔓 Без авторизации'}\n\n"
+        f"🔗 Ссылка:\n`{link}`\n\n"
+        f"_Telegram → Настройки → Данные → Тип соединения → SOCKS5_\n"
+        f"_WhatsApp → Настройки → Конфиденциальность → Прокси_",
+        reply_markup=InlineKeyboardMarkup([
+            [_toggle_btn(st["running"], "proxy_socks_stop", "proxy_socks_start"),
+             InlineKeyboardButton("🔄 Рестарт",       callback_data="proxy_socks_restart")],
+            [InlineKeyboardButton("⚙️ Порт / пароль", callback_data="proxy_socks_edit")],
+            [InlineKeyboardButton("🔄 Обновить",      callback_data="proxy_socks_menu")],
+            [InlineKeyboardButton("◀️ Назад",         callback_data="proxy_menu")],
+        ]),
+        parse_mode="Markdown"
+    )
+
+async def show_socks_edit(query):
+    await query.edit_message_text(
+        f"⚙️ Настройки SOCKS5\n\n"
+        f"Порт: {socks_get_port()}\n"
+        f"{'Логин: ' + socks_get_user() if socks_get_user() else 'Авторизация: отключена'}",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔢 Сменить порт",   callback_data="proxy_socks_edit_port")],
+            [InlineKeyboardButton("🔑 Сменить пароль", callback_data="proxy_socks_edit_pass")],
+            [InlineKeyboardButton("🔓 Убрать пароль",  callback_data="proxy_socks_no_auth")],
+            [InlineKeyboardButton("❌ Отмена",         callback_data="proxy_socks_menu")],
+        ])
+    )
+
+async def socks_edit_port_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.edit_message_text("🔢 Введите новый порт SOCKS5 (1024–65535):")
+    return WAIT_SOCKS_PORT
+
+async def socks_edit_pass_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    context.user_data["new_socks_port"] = socks_get_port()
+    await update.callback_query.edit_message_text(
+        "🔑 Введите новый пароль\n(или `-` чтобы отключить авторизацию):"
+    )
+    return WAIT_SOCKS_PASS
+
+async def socks_receive_port(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if not text.isdigit() or not (1024 <= int(text) <= 65535):
+        await update.message.reply_text("❌ Неверный порт. Введите от 1024 до 65535:")
+        return WAIT_SOCKS_PORT
+    context.user_data["new_socks_port"] = text
+    await update.message.reply_text(f"✅ Порт: {text}\n\nВведите пароль (или `-` для отключения):")
+    return WAIT_SOCKS_PASS
+
+async def socks_receive_pass(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pwd  = update.message.text.strip()
+    port = context.user_data.get("new_socks_port", socks_get_port())
+    if pwd == "-":
+        user, pwd = "", ""
+    else:
+        user = socks_get_user() or "proxy"
+    ok, msg = socks_apply(port, user, pwd)
+    await update.message.reply_text(msg)
+    return ConversationHandler.END
+
+async def socks_no_auth(query):
+    ok, msg = socks_apply(socks_get_port(), "", "")
+    await query.answer(msg, show_alert=True)
+    await show_socks_menu(query)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WHATSAPP PROXY
+# ══════════════════════════════════════════════════════════════════════════════
+
+def wa_docker_ok() -> bool:
+    try:
+        subprocess.check_output(["docker", "info"], stderr=subprocess.DEVNULL, timeout=10)
+        return True
+    except:
+        return False
+
+def wa_installed() -> bool:
+    try:
+        r = subprocess.run(
+            ["docker", "ps", "-a", "--filter", "name=whatsapp-proxy", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=10
+        )
+        return "whatsapp-proxy" in r.stdout
+    except:
+        return False
+
+def wa_status() -> dict:
+    try:
+        out = subprocess.check_output(
+            ["docker", "inspect", "--format", "{{.State.Status}}", "whatsapp-proxy"],
+            text=True, stderr=subprocess.DEVNULL, timeout=10
+        ).strip()
+        running = out == "running"
+    except:
+        running = False
+    uptime_str = ""
+    if running:
+        try:
+            import datetime
+            raw = subprocess.check_output(
+                ["docker", "inspect", "--format", "{{.State.StartedAt}}", "whatsapp-proxy"],
+                text=True, timeout=10
+            ).strip()
+            started = datetime.datetime.strptime(raw[:19], "%Y-%m-%dT%H:%M:%S")
+            delta = datetime.datetime.utcnow() - started
+            h, r = divmod(int(delta.total_seconds()), 3600)
+            uptime_str = f"{h}ч {r // 60}м"
+        except:
+            pass
+    return {"running": running, "uptime": uptime_str}
+
+def wa_get_port() -> str: return load_conf().get("WA_PORT", "443")
+
+def wa_start()   -> tuple[bool, str]:
+    r = subprocess.run(["docker", "start",   "whatsapp-proxy"], capture_output=True, text=True, timeout=15)
+    return (True, "▶️ WhatsApp прокси запущен") if r.returncode == 0 else (False, f"❌ {r.stderr.strip()}")
+
+def wa_stop()    -> tuple[bool, str]:
+    r = subprocess.run(["docker", "stop",    "whatsapp-proxy"], capture_output=True, text=True, timeout=15)
+    return (True, "⏹ WhatsApp прокси остановлен") if r.returncode == 0 else (False, f"❌ {r.stderr.strip()}")
+
+def wa_restart() -> tuple[bool, str]:
+    r = subprocess.run(["docker", "restart", "whatsapp-proxy"], capture_output=True, text=True, timeout=20)
+    return (True, "🔄 WhatsApp прокси перезапущен") if r.returncode == 0 else (False, f"❌ {r.stderr.strip()}")
+
+def wa_update() -> tuple[bool, str]:
+    try:
+        port = wa_get_port()
+        subprocess.run(["docker", "stop", "whatsapp-proxy"], capture_output=True)
+        subprocess.run(["docker", "rm",   "whatsapp-proxy"], capture_output=True)
+        subprocess.run(["docker", "pull", "ghcr.io/whatsapp/proxy:latest"], check=True, timeout=180)
+        r = subprocess.run([
+            "docker", "run", "-d", "--name", "whatsapp-proxy", "--restart", "always",
+            "-p", f"{port}:443", "-p", f"{port}:80",
+            "-p", "5222:5222", "-p", "8080:8080", "-p", "8443:8443", "-p", "8888:8888",
+            "ghcr.io/whatsapp/proxy:latest"
+        ], capture_output=True, text=True, timeout=30)
+        return (True, "✅ Обновлён и перезапущен") if r.returncode == 0 else (False, f"❌ {r.stderr.strip()}")
+    except subprocess.TimeoutExpired:
+        return False, "❌ Таймаут при скачивании образа"
+    except Exception as e:
+        return False, f"❌ {e}"
+
+async def show_wa_menu(query):
+    if not wa_docker_ok():
+        await query.edit_message_text(
+            "⚫ Docker не установлен.\n\n"
+            "WhatsApp прокси работает только через Docker.\n"
+            "Переустановите аддон и выберите WhatsApp при установке.",
+            reply_markup=_back_kb()
+        )
+        return
+    if not wa_installed():
+        await query.edit_message_text(
+            "⚫ WhatsApp прокси не установлен.\n\n"
+            "Запустите:\n`bash <(curl -s https://raw.githubusercontent.com/"
+            "yntoolsmail-prog/Proxy-Telegram-Whatsapp/main/setup_proxy.sh)`",
+            reply_markup=_back_kb(), parse_mode="Markdown"
+        )
+        return
+    st   = wa_status()
+    port = wa_get_port()
+    ip   = get_server_ip()
+    await query.edit_message_text(
+        f"💬 WhatsApp прокси\n\n"
+        f"Статус: {_status_line(st['running'], st['uptime'])}\n"
+        f"🌐 {ip}  |  Порт: {port}\n\n"
+        f"📱 Адрес для WhatsApp:\n`{ip}:{port}`\n\n"
+        f"_WhatsApp → Настройки → Конфиденциальность →_\n"
+        f"_Расширенные → Использовать прокси_",
+        reply_markup=InlineKeyboardMarkup([
+            [_toggle_btn(st["running"], "proxy_wa_stop", "proxy_wa_start"),
+             InlineKeyboardButton("🔄 Рестарт",       callback_data="proxy_wa_restart")],
+            [InlineKeyboardButton("⬆️ Обновить образ", callback_data="proxy_wa_update")],
+            [InlineKeyboardButton("🔄 Обновить",       callback_data="proxy_wa_menu")],
+            [InlineKeyboardButton("◀️ Назад",          callback_data="proxy_menu")],
+        ]),
+        parse_mode="Markdown"
+    )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ГЛАВНОЕ МЕНЮ
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def show_proxy_menu(query):
+    ip = get_server_ip()
+    lines = [f"📡 Proxy Manager\n\n🌐 {ip}\n"]
+
+    if mtp_installed():
+        st = _svc_status(MTP_SERVICE)
+        lines.append(f"{'🟢' if st['running'] else '🔴'} MTProxy{f' ({st[chr(117)ptime]})' if st['uptime'] else ''}")
+    else:
+        lines.append("⚫ MTProxy — не установлен")
+
+    if socks_installed():
+        st = _svc_status(SOCKS_SERVICE)
+        lines.append(f"{'🟢' if st['running'] else '🔴'} SOCKS5{f' ({st[chr(117)ptime]})' if st['uptime'] else ''}")
+    else:
+        lines.append("⚫ SOCKS5 — не установлен")
+
+    if wa_docker_ok() and wa_installed():
+        st = wa_status()
+        lines.append(f"{'🟢' if st['running'] else '🔴'} WhatsApp прокси{f' ({st[chr(117)ptime]})' if st['uptime'] else ''}")
+    elif wa_docker_ok():
+        lines.append("⚫ WhatsApp прокси — не установлен")
+    else:
+        lines.append("⚫ WhatsApp прокси — нет Docker")
+
+    await query.edit_message_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📡 MTProxy",         callback_data="proxy_mtp_menu")],
+            [InlineKeyboardButton("🧦 SOCKS5",          callback_data="proxy_socks_menu")],
+            [InlineKeyboardButton("💬 WhatsApp прокси", callback_data="proxy_wa_menu")],
+            [InlineKeyboardButton("🖥 Сервер",          callback_data="proxy_server")],
+            [InlineKeyboardButton("🔄 Обновить",        callback_data="proxy_menu")],
+            [InlineKeyboardButton("◀️ В меню",          callback_data="back")],
+        ])
+    )
+
+async def show_server(query):
+    await query.edit_message_text(
+        f"🖥 Статус сервера\n\n{server_stats()}",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Обновить", callback_data="proxy_server")],
+            [InlineKeyboardButton("◀️ Назад",    callback_data="proxy_menu")],
+        ])
+    )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ГЛАВНЫЙ РОУТЕР — используется и standalone и addon
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def handle_proxy_callback(query, data: str, user_id: int, admin_id: int) -> bool:
+    if user_id != admin_id:
+        await query.answer("⛔ Только для администратора", show_alert=True)
+        return True
+
+    if   data == "proxy_menu":   await show_proxy_menu(query)
+    elif data == "proxy_server": await show_server(query)
+
+    elif data == "proxy_mtp_menu":    await show_mtp_menu(query)
+    elif data == "proxy_mtp_start":
+        ok, msg = mtp_start();   await query.answer(msg, show_alert=not ok); await show_mtp_menu(query)
+    elif data == "proxy_mtp_stop":
+        ok, msg = mtp_stop();    await query.answer(msg, show_alert=not ok); await show_mtp_menu(query)
+    elif data == "proxy_mtp_restart":
+        ok, msg = mtp_restart(); await query.answer(msg, show_alert=not ok); await show_mtp_menu(query)
+    elif data == "proxy_mtp_secret_ask": await show_mtp_secret_ask(query)
+    elif data in ("proxy_mtp_secret_faketls", "proxy_mtp_secret_plain"):
+        new_s = mtp_generate_secret(fake_tls=data.endswith("faketls"))
+        await query.edit_message_text("⏳ Применяю новый секрет...")
+        ok, msg = mtp_apply_secret(new_s)
+        await query.answer(msg, show_alert=True); await show_mtp_menu(query)
+    elif data == "proxy_mtp_update_cfg":
+        await query.edit_message_text("⏳ Загружаю конфиги Telegram...")
+        ok, msg = mtp_update_tg_configs()
+        if ok: mtp_restart()
+        await query.answer(msg, show_alert=True); await show_mtp_menu(query)
+
+    elif data == "proxy_socks_menu":    await show_socks_menu(query)
+    elif data == "proxy_socks_start":
+        ok, msg = socks_start();   await query.answer(msg, show_alert=not ok); await show_socks_menu(query)
+    elif data == "proxy_socks_stop":
+        ok, msg = socks_stop();    await query.answer(msg, show_alert=not ok); await show_socks_menu(query)
+    elif data == "proxy_socks_restart":
+        ok, msg = socks_restart(); await query.answer(msg, show_alert=not ok); await show_socks_menu(query)
+    elif data == "proxy_socks_edit":    await show_socks_edit(query)
+    elif data == "proxy_socks_no_auth": await socks_no_auth(query)
+
+    elif data == "proxy_wa_menu":    await show_wa_menu(query)
+    elif data == "proxy_wa_start":
+        ok, msg = wa_start();   await query.answer(msg, show_alert=not ok); await show_wa_menu(query)
+    elif data == "proxy_wa_stop":
+        ok, msg = wa_stop();    await query.answer(msg, show_alert=not ok); await show_wa_menu(query)
+    elif data == "proxy_wa_restart":
+        ok, msg = wa_restart(); await query.answer(msg, show_alert=not ok); await show_wa_menu(query)
+    elif data == "proxy_wa_update":
+        await query.edit_message_text("⏳ Обновляю образ...\nЭто займёт пару минут.")
+        ok, msg = wa_update()
+        await query.answer(msg, show_alert=True); await show_wa_menu(query)
+
+    else:
+        return False
+    return True
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STANDALONE
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conf    = load_conf()
+    user_id = update.effective_user.id
+    admin   = int(conf.get("ADMIN_ID", 0))
+    if user_id != admin:
+        await update.message.reply_text("⛔ Нет доступа.")
+        return
+    await update.message.reply_text(
+        f"📡 Proxy Manager\n\n🌐 {get_server_ip()}",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📡 MTProxy",         callback_data="proxy_mtp_menu")],
+            [InlineKeyboardButton("🧦 SOCKS5",          callback_data="proxy_socks_menu")],
+            [InlineKeyboardButton("💬 WhatsApp прокси", callback_data="proxy_wa_menu")],
+            [InlineKeyboardButton("🖥 Сервер",          callback_data="proxy_server")],
+        ])
+    )
+
+async def _button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query   = update.callback_query
+    user_id = query.from_user.id
+    await query.answer()
+    conf  = load_conf()
+    admin = int(conf.get("ADMIN_ID", 0))
+    data  = "proxy_menu" if query.data == "back" else query.data
+    await handle_proxy_callback(query, data, user_id, admin)
+
+def main_standalone():
+    conf = load_conf()
+    if not conf.get("BOT_TOKEN"):
+        setup_interactive()
+        conf = load_conf()
+
+    app = Application.builder().token(conf["BOT_TOKEN"]).build()
+
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(ConversationHandler(
+        entry_points=[CallbackQueryHandler(socks_edit_port_entry, pattern="^proxy_socks_edit_port$")],
+        states={
+            WAIT_SOCKS_PORT: [MessageHandler(filters.TEXT & ~filters.COMMAND, socks_receive_port)],
+            WAIT_SOCKS_PASS: [MessageHandler(filters.TEXT & ~filters.COMMAND, socks_receive_pass)],
+        },
+        fallbacks=[], per_chat=True,
+    ))
+    app.add_handler(ConversationHandler(
+        entry_points=[CallbackQueryHandler(socks_edit_pass_entry, pattern="^proxy_socks_edit_pass$")],
+        states={
+            WAIT_SOCKS_PASS: [MessageHandler(filters.TEXT & ~filters.COMMAND, socks_receive_pass)],
+        },
+        fallbacks=[], per_chat=True,
+    ))
+    app.add_handler(CallbackQueryHandler(_button_handler))
+
+    admin_id = int(conf.get("ADMIN_ID", 0))
+    logger.info(f"Proxy Bot запущен. Admin: {admin_id}")
+    print(f"\n\033[0;32m✓ Proxy Bot запущен! Admin ID: {admin_id}\033[0m\n")
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main_standalone()
