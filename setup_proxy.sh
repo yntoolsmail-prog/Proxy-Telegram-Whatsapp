@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxy Bot — установщик (MTProxy + SOCKS5 + WhatsApp)
+# Proxy Bot — установщик (MTProxy + WhatsApp прокси)
 # Использование: bash <(curl -s https://raw.githubusercontent.com/yntoolsmail-prog/Proxy-Telegram-Whatsapp/main/setup_proxy.sh)
 # =============================================================================
 # Version: 1.0
@@ -27,7 +27,7 @@ clear
 echo -e "${CYAN}${BOLD}"
 echo "  ╔══════════════════════════════════════════╗"
 echo "  ║         Proxy Bot — Установка            ║"
-echo "  ║  MTProxy + SOCKS5 + WhatsApp для Telegram║"
+echo "  ║     MTProxy + WhatsApp для Telegram     ║"
 echo "  ╚══════════════════════════════════════════╝"
 echo -e "${NC}"
 
@@ -72,43 +72,29 @@ fi
 echo ""
 sep "Выбор прокси"
 echo ""
-echo -e "  ${CYAN}1)${NC} ${BOLD}Все три${NC} — MTProxy + SOCKS5 + WhatsApp ${GREEN}(рекомендуется)${NC}"
+echo -e "  ${CYAN}1)${NC} ${BOLD}MTProxy + WhatsApp${NC} ${GREEN}(рекомендуется)${NC}"
+echo -e "     MTProxy для Telegram + официальный прокси для WhatsApp."
+echo -e "     ${YELLOW}⚠ WhatsApp требует Docker${NC} (~200 MB установка, ~50 MB RAM постоянно)"
 echo ""
-echo -e "  ${CYAN}2)${NC} ${BOLD}MTProxy${NC} — только для Telegram"
+echo -e "  ${CYAN}2)${NC} ${BOLD}Только MTProxy${NC} — для Telegram"
 echo -e "     Нативная поддержка в Telegram. Быстро, без Docker."
 echo ""
-echo -e "  ${CYAN}3)${NC} ${BOLD}SOCKS5${NC} — для Telegram и WhatsApp"
-echo -e "     Универсальный прокси. Telegram и WA поддерживают SOCKS5."
-echo -e "     Менее устойчив к DPI чем MTProxy."
-echo ""
-echo -e "  ${CYAN}4)${NC} ${BOLD}WhatsApp прокси${NC} — только для WhatsApp"
+echo -e "  ${CYAN}3)${NC} ${BOLD}Только WhatsApp прокси${NC}"
+echo -e "     Официальный контейнер от Meta."
 echo -e "     ${YELLOW}⚠ Требует Docker${NC} (~200 MB установка, ~50 MB RAM постоянно)"
-echo -e "     Официальный контейнер от Meta. Работает только с WhatsApp."
-echo ""
-echo -e "  ${CYAN}5)${NC} ${BOLD}MTProxy + SOCKS5${NC} — без WhatsApp"
-echo ""
-echo -e "  ${CYAN}6)${NC} ${BOLD}MTProxy + WhatsApp${NC}"
-echo -e "     ${YELLOW}⚠ Требует Docker для WhatsApp части${NC}"
-echo ""
-echo -e "  ${CYAN}7)${NC} ${BOLD}SOCKS5 + WhatsApp${NC}"
-echo -e "     ${YELLOW}⚠ Требует Docker для WhatsApp части${NC}"
 echo ""
 while true; do
     read -p "  Ваш выбор [1]: " PROXY_CHOICE
     PROXY_CHOICE=${PROXY_CHOICE:-1}
-    [[ "$PROXY_CHOICE" =~ ^[1-7]$ ]] && break
-    warn "Введите число от 1 до 7."
+    [[ "$PROXY_CHOICE" =~ ^[1-3]$ ]] && break
+    warn "Введите 1, 2 или 3."
 done
 
-INSTALL_MTP=false; INSTALL_SOCKS=false; INSTALL_WA=false
+INSTALL_MTP=false; INSTALL_WA=false
 case "$PROXY_CHOICE" in
-    1) INSTALL_MTP=true;  INSTALL_SOCKS=true;  INSTALL_WA=true  ;;
-    2) INSTALL_MTP=true                                           ;;
-    3)                    INSTALL_SOCKS=true                      ;;
-    4)                                          INSTALL_WA=true  ;;
-    5) INSTALL_MTP=true;  INSTALL_SOCKS=true                     ;;
-    6) INSTALL_MTP=true;                        INSTALL_WA=true  ;;
-    7)                    INSTALL_SOCKS=true;   INSTALL_WA=true  ;;
+    1) INSTALL_MTP=true; INSTALL_WA=true ;;
+    2) INSTALL_MTP=true                  ;;
+    3)                   INSTALL_WA=true ;;
 esac
 
 # Предупреждение про Docker
@@ -198,9 +184,11 @@ if [[ "$INSTALL_MTP" == "true" ]]; then
     if [[ -f "$MTP_BIN" ]]; then
         warn "MTProxy уже собран."
     else
-        log "Клонирование MTProxy..."
+        log "Клонирование MTProxy (GetPageSpeed fork)..."
         rm -rf "$MTP_DIR"
-        git clone --depth=1 https://github.com/TelegramMessenger/MTProxy "$MTP_DIR" \
+        # Используем форк GetPageSpeed — исправлен краш на серверах с PID > 65535
+        # Оригинальный TelegramMessenger/MTProxy падает на таких серверах
+        git clone --depth=1 https://github.com/GetPageSpeed/MTProxy "$MTP_DIR" \
             || err "Не удалось скачать MTProxy."
         log "Сборка (~1-2 минуты)..."
         cd "$MTP_DIR" && make -j$(nproc) 2>&1 | tail -3 && cd /root
@@ -225,20 +213,34 @@ if [[ "$INSTALL_MTP" == "true" ]]; then
         warn "Порт ${MTP_PORT} занят! Проверьте после установки."
 
     echo ""
-    echo -e "  ${CYAN}1)${NC} fake-TLS ${GREEN}(рекомендуется)${NC} — маскировка под HTTPS"
-    echo -e "  ${CYAN}2)${NC} plain — стандартный MTProxy"
+    echo -e "  ${CYAN}${BOLD}Тип секрета (способ маскировки трафика)${NC}"
+    echo ""
+    echo -e "  ${CYAN}1)${NC} ${BOLD}fake-TLS${NC} ${GREEN}(рекомендуется)${NC}"
+    echo -e "     Трафик выглядит как обычный HTTPS."
+    echo -e "     DPI и РКН не могут отличить от обычного сайта."
+    echo -e "     Значительно сложнее заблокировать."
+    echo ""
+    echo -e "  ${CYAN}2)${NC} ${BOLD}plain${NC}"
+    echo -e "     Трафик выглядит как MTProxy — протокол виден."
+    echo -e "     Легче детектируется и блокируется."
+    echo -e "     Выбирайте только если fake-TLS не работает."
     echo ""
     while true; do
         read -p "  Тип секрета [1]: " ST; ST=${ST:-1}
         [[ "$ST" == "1" || "$ST" == "2" ]] && break
     done
-    RAW_SECRET=$(head -c 16 /dev/urandom | xxd -ps)
-    [[ "$ST" == "1" ]] && MTP_SECRET="dd${RAW_SECRET}" || MTP_SECRET="$RAW_SECRET"
+    # Секрет — всегда 32 hex символа. Префикс dd добавляется только в ссылку для клиента,
+    # но НЕ передаётся в -S флаг бинарника (там строго 32 символа).
+    # Для fake-TLS используется флаг -D с доменом.
+    MTP_SECRET=$(head -c 16 /dev/urandom | xxd -ps)
     [[ "$ST" == "1" ]] && SECRET_MODE="fake-TLS" || SECRET_MODE="plain"
+    # В конфиге и ссылке храним с dd чтобы Telegram понял режим
+    [[ "$ST" == "1" ]] && MTP_SECRET_STORE="dd${MTP_SECRET}" || MTP_SECRET_STORE="${MTP_SECRET}"
+    [[ "$ST" == "1" ]] && MTP_FAKETLS_FLAG="-D google.com" || MTP_FAKETLS_FLAG=""
 
     command -v ufw &>/dev/null && ufw allow "${MTP_PORT}/tcp" comment "MTProxy" 2>/dev/null || true
 
-    printf "MTP_PORT=%s\nMTP_SECRET=%s\n" "$MTP_PORT" "$MTP_SECRET" >> "$CONF_FILE"
+    printf "MTP_PORT=%s\nMTP_SECRET=%s\n" "$MTP_PORT" "$MTP_SECRET_STORE" >> "$CONF_FILE"
 
     cat > /etc/systemd/system/mtproxy.service << EOF
 [Unit]
@@ -248,7 +250,7 @@ Wants=network-online.target
 
 [Service]
 ExecStartPre=/bin/sh -c 'curl -sf https://core.telegram.org/getProxySecret -o ${MTP_DIR}/proxy-secret; curl -sf https://core.telegram.org/getProxyConfig -o ${MTP_DIR}/proxy-multi.conf'
-ExecStart=${MTP_BIN} -u nobody -p 8888 -H ${MTP_PORT} -S ${MTP_SECRET} --aes-pwd ${MTP_DIR}/proxy-secret ${MTP_DIR}/proxy-multi.conf -M 1
+ExecStart=${MTP_BIN} -u nobody -p 8888 -H ${MTP_PORT} -S ${MTP_SECRET} ${MTP_FAKETLS_FLAG} --aes-pwd ${MTP_DIR}/proxy-secret ${MTP_DIR}/proxy-multi.conf -M 1
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
@@ -262,78 +264,6 @@ EOF
     systemctl start  mtproxy
     sleep 2
     systemctl is-active --quiet mtproxy && log "MTProxy запущен ✓" || warn "MTProxy не запустился — journalctl -u mtproxy"
-fi
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ШАГ 6: SOCKS5
-# ══════════════════════════════════════════════════════════════════════════════
-if [[ "$INSTALL_SOCKS" == "true" ]]; then
-    echo ""
-    sep "SOCKS5 (microsocks)"
-
-    if [[ ! -f /usr/local/bin/microsocks ]]; then
-        log "Сборка microsocks..."
-        MSOCKS_TMP=$(mktemp -d)
-        git clone --depth=1 https://github.com/rofl0r/microsocks "$MSOCKS_TMP" \
-            || err "Не удалось скачать microsocks."
-        cd "$MSOCKS_TMP" && make && cp microsocks /usr/local/bin/ && chmod +x /usr/local/bin/microsocks
-        cd /root && rm -rf "$MSOCKS_TMP"
-        log "microsocks установлен ✓"
-    else
-        warn "microsocks уже установлен."
-    fi
-
-    echo ""
-    while true; do
-        read -p "  Порт SOCKS5 [1080]: " SOCKS_PORT
-        SOCKS_PORT=${SOCKS_PORT:-1080}
-        [[ "$SOCKS_PORT" =~ ^[0-9]+$ && "$SOCKS_PORT" -ge 1024 && "$SOCKS_PORT" -le 65535 ]] && break
-        warn "Введите порт от 1024 до 65535."
-    done
-
-    echo ""
-    echo -e "  ${CYAN}1)${NC} С паролем ${GREEN}(рекомендуется)${NC}"
-    echo -e "  ${CYAN}2)${NC} Без авторизации"
-    echo ""
-    while true; do
-        read -p "  Авторизация [1]: " AUTH; AUTH=${AUTH:-1}
-        [[ "$AUTH" == "1" || "$AUTH" == "2" ]] && break
-    done
-
-    SOCKS_USER=""; SOCKS_PASS=""; SOCKS_AUTH_ARGS=""
-    if [[ "$AUTH" == "1" ]]; then
-        SOCKS_USER="proxy"
-        SOCKS_PASS=$(head -c 8 /dev/urandom | xxd -ps)
-        SOCKS_AUTH_ARGS="-u ${SOCKS_USER} -P ${SOCKS_PASS}"
-        info "Логин: ${SOCKS_USER}  |  Пароль: ${SOCKS_PASS}"
-    fi
-
-    command -v ufw &>/dev/null && ufw allow "${SOCKS_PORT}/tcp" comment "SOCKS5" 2>/dev/null || true
-
-    printf "SOCKS_PORT=%s\nSOCKS_USER=%s\nSOCKS_PASS=%s\n" \
-        "$SOCKS_PORT" "$SOCKS_USER" "$SOCKS_PASS" >> "$CONF_FILE"
-
-    cat > /etc/systemd/system/microsocks.service << EOF
-[Unit]
-Description=SOCKS5 Proxy (microsocks)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-ExecStart=/usr/local/bin/microsocks -p ${SOCKS_PORT} ${SOCKS_AUTH_ARGS}
-Restart=on-failure
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable microsocks
-    systemctl start  microsocks
-    sleep 2
-    systemctl is-active --quiet microsocks && log "SOCKS5 запущен ✓" || warn "SOCKS5 не запустился — journalctl -u microsocks"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -421,7 +351,7 @@ if [[ "$INSTALL_MODE" == "standalone" ]]; then
     log "Создаём systemd сервис proxy-bot..."
     cat > /etc/systemd/system/proxy-bot.service << 'EOF'
 [Unit]
-Description=Proxy Bot (MTProxy + SOCKS5 + WhatsApp)
+Description=Proxy Bot (MTProxy + WhatsApp)
 After=network-online.target
 Wants=network-online.target
 
@@ -552,15 +482,6 @@ if [[ "$INSTALL_MTP" == "true" ]]; then
     MTP_LINK="https://t.me/proxy?server=${SERVER_IP}&port=${MTP_PORT}&secret=${MTP_SECRET}"
     echo -e "  ${CYAN}📡 MTProxy${NC} (${SECRET_MODE})  порт ${MTP_PORT}"
     echo -e "  ${GREEN}${MTP_LINK}${NC}"
-    echo ""
-fi
-
-if [[ "$INSTALL_SOCKS" == "true" ]]; then
-    [[ -n "$SOCKS_USER" ]] && \
-        SOCKS_LINK="socks5://${SOCKS_USER}:${SOCKS_PASS}@${SERVER_IP}:${SOCKS_PORT}" || \
-        SOCKS_LINK="socks5://${SERVER_IP}:${SOCKS_PORT}"
-    echo -e "  ${CYAN}🧦 SOCKS5${NC}  порт ${SOCKS_PORT}"
-    echo -e "  ${GREEN}${SOCKS_LINK}${NC}"
     echo ""
 fi
 

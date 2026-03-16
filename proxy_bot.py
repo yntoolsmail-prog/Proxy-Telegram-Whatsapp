@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Version: 1.0
-# proxy_bot.py — MTProxy + SOCKS5 + WhatsApp прокси
+# proxy_bot.py — MTProxy + WhatsApp прокси
 # Режим: standalone (свой токен) или addon (импорт в bot.py)
 
 import os, subprocess, time, secrets, logging
@@ -16,13 +16,10 @@ MTP_BIN       = f"{MTP_DIR}/objs/bin/mtproto-proxy"
 MTP_SECRET_F  = f"{MTP_DIR}/proxy-secret"
 MTP_MULTI_F   = f"{MTP_DIR}/proxy-multi.conf"
 MTP_SERVICE   = "mtproxy"
-SOCKS_SERVICE = "microsocks"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-WAIT_SOCKS_PORT = 31
-WAIT_SOCKS_PASS = 32
 
 # ══════════════════════════════════════════════════════════════════════════════
 # КОНФИГ
@@ -207,6 +204,10 @@ def mtp_update_tg_configs() -> tuple[bool, str]:
         return False, f"❌ {e}"
 
 def _write_mtp_service(port: str, secret: str):
+    """secret должен быть чистым 32-символьным hex без префикса dd.
+    Для fake-TLS добавляем флаг -D google.com."""
+    stored = load_conf().get("MTP_SECRET", "")
+    faketls = "-D google.com" if stored.startswith("dd") else ""
     with open(f"/etc/systemd/system/{MTP_SERVICE}.service", "w") as f:
         f.write(
             f"[Unit]\nDescription=MTProxy for Telegram\n"
@@ -216,7 +217,7 @@ def _write_mtp_service(port: str, secret: str):
             f" -o {MTP_SECRET_F}; curl -sf https://core.telegram.org/getProxyConfig"
             f" -o {MTP_MULTI_F}'\n"
             f"ExecStart={MTP_BIN} -u nobody -p 8888 -H {port} -S {secret}"
-            f" --aes-pwd {MTP_SECRET_F} {MTP_MULTI_F} -M 1\n"
+            f" {faketls} --aes-pwd {MTP_SECRET_F} {MTP_MULTI_F} -M 1\n"
             f"Restart=on-failure\nRestartSec=10\n"
             f"StandardOutput=journal\nStandardError=journal\n\n"
             f"[Install]\nWantedBy=multi-user.target\n"
@@ -224,8 +225,11 @@ def _write_mtp_service(port: str, secret: str):
     subprocess.run(["systemctl", "daemon-reload"])
 
 def mtp_apply_secret(new_secret: str) -> tuple[bool, str]:
+    """new_secret может быть с префиксом dd (для ссылки) или без.
+    В systemd сервис передаём всегда чистые 32 символа без dd."""
     save_conf({"MTP_SECRET": new_secret})
-    _write_mtp_service(mtp_get_port(), new_secret)
+    clean = new_secret[2:] if new_secret.startswith("dd") else new_secret
+    _write_mtp_service(mtp_get_port(), clean)
     return _svc_action(MTP_SERVICE, "restart", "🔄 MTProxy перезапущен с новым секретом")
 
 def mtp_start()   -> tuple[bool, str]: return _svc_action(MTP_SERVICE, "start",   "▶️ MTProxy запущен")
@@ -277,126 +281,6 @@ async def show_mtp_secret_ask(query):
         ]),
         parse_mode="Markdown"
     )
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SOCKS5
-# ══════════════════════════════════════════════════════════════════════════════
-
-def socks_installed() -> bool:
-    return os.path.exists("/usr/local/bin/microsocks")
-
-def socks_get_port() -> str: return load_conf().get("SOCKS_PORT", "1080")
-def socks_get_user() -> str: return load_conf().get("SOCKS_USER", "")
-def socks_get_pass() -> str: return load_conf().get("SOCKS_PASS", "")
-
-def socks_build_link(port: str, ip: str, user: str = "", pwd: str = "") -> str:
-    return f"socks5://{user}:{pwd}@{ip}:{port}" if user and pwd else f"socks5://{ip}:{port}"
-
-def _write_socks_service(port: str, user: str, pwd: str):
-    auth = f"-u {user} -P {pwd}" if user and pwd else ""
-    with open(f"/etc/systemd/system/{SOCKS_SERVICE}.service", "w") as f:
-        f.write(
-            f"[Unit]\nDescription=SOCKS5 Proxy (microsocks)\n"
-            f"After=network-online.target\nWants=network-online.target\n\n"
-            f"[Service]\nExecStart=/usr/local/bin/microsocks -p {port} {auth}\n"
-            f"Restart=on-failure\nRestartSec=10\n"
-            f"StandardOutput=journal\nStandardError=journal\n\n"
-            f"[Install]\nWantedBy=multi-user.target\n"
-        )
-    subprocess.run(["systemctl", "daemon-reload"])
-
-def socks_apply(port: str, user: str, pwd: str) -> tuple[bool, str]:
-    save_conf({"SOCKS_PORT": port, "SOCKS_USER": user, "SOCKS_PASS": pwd})
-    _write_socks_service(port, user, pwd)
-    return _svc_action(SOCKS_SERVICE, "restart", "🔄 SOCKS5 перезапущен")
-
-def socks_start()   -> tuple[bool, str]: return _svc_action(SOCKS_SERVICE, "start",   "▶️ SOCKS5 запущен")
-def socks_stop()    -> tuple[bool, str]: return _svc_action(SOCKS_SERVICE, "stop",    "⏹ SOCKS5 остановлен")
-def socks_restart() -> tuple[bool, str]: return _svc_action(SOCKS_SERVICE, "restart", "🔄 SOCKS5 перезапущен")
-
-async def show_socks_menu(query):
-    if not socks_installed():
-        await query.edit_message_text(
-            "⚫ SOCKS5 не установлен.\n\n"
-            "Запустите:\n`bash <(curl -s https://raw.githubusercontent.com/"
-            "yntoolsmail-prog/Proxy-Telegram-Whatsapp/main/setup_proxy.sh)`",
-            reply_markup=_back_kb(), parse_mode="Markdown"
-        )
-        return
-    st   = _svc_status(SOCKS_SERVICE)
-    port = socks_get_port()
-    user = socks_get_user()
-    pwd  = socks_get_pass()
-    ip   = get_server_ip()
-    link = socks_build_link(port, ip, user, pwd)
-    await query.edit_message_text(
-        f"🧦 SOCKS5\n\n"
-        f"Статус: {_status_line(st['running'], st['uptime'])}\n"
-        f"🌐 {ip}:{port}\n"
-        f"{'👤 Логин: ' + user if user else '🔓 Без авторизации'}\n\n"
-        f"🔗 Ссылка:\n`{link}`\n\n"
-        f"_Telegram → Настройки → Данные → Тип соединения → SOCKS5_\n"
-        f"_WhatsApp → Настройки → Конфиденциальность → Прокси_",
-        reply_markup=InlineKeyboardMarkup([
-            [_toggle_btn(st["running"], "proxy_socks_stop", "proxy_socks_start"),
-             InlineKeyboardButton("🔄 Рестарт",       callback_data="proxy_socks_restart")],
-            [InlineKeyboardButton("⚙️ Порт / пароль", callback_data="proxy_socks_edit")],
-            [InlineKeyboardButton("🔄 Обновить",      callback_data="proxy_socks_menu")],
-            [InlineKeyboardButton("◀️ Назад",         callback_data="proxy_menu")],
-        ]),
-        parse_mode="Markdown"
-    )
-
-async def show_socks_edit(query):
-    await query.edit_message_text(
-        f"⚙️ Настройки SOCKS5\n\n"
-        f"Порт: {socks_get_port()}\n"
-        f"{'Логин: ' + socks_get_user() if socks_get_user() else 'Авторизация: отключена'}",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔢 Сменить порт",   callback_data="proxy_socks_edit_port")],
-            [InlineKeyboardButton("🔑 Сменить пароль", callback_data="proxy_socks_edit_pass")],
-            [InlineKeyboardButton("🔓 Убрать пароль",  callback_data="proxy_socks_no_auth")],
-            [InlineKeyboardButton("❌ Отмена",         callback_data="proxy_socks_menu")],
-        ])
-    )
-
-async def socks_edit_port_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text("🔢 Введите новый порт SOCKS5 (1024–65535):")
-    return WAIT_SOCKS_PORT
-
-async def socks_edit_pass_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    context.user_data["new_socks_port"] = socks_get_port()
-    await update.callback_query.edit_message_text(
-        "🔑 Введите новый пароль\n(или `-` чтобы отключить авторизацию):"
-    )
-    return WAIT_SOCKS_PASS
-
-async def socks_receive_port(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if not text.isdigit() or not (1024 <= int(text) <= 65535):
-        await update.message.reply_text("❌ Неверный порт. Введите от 1024 до 65535:")
-        return WAIT_SOCKS_PORT
-    context.user_data["new_socks_port"] = text
-    await update.message.reply_text(f"✅ Порт: {text}\n\nВведите пароль (или `-` для отключения):")
-    return WAIT_SOCKS_PASS
-
-async def socks_receive_pass(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pwd  = update.message.text.strip()
-    port = context.user_data.get("new_socks_port", socks_get_port())
-    if pwd == "-":
-        user, pwd = "", ""
-    else:
-        user = socks_get_user() or "proxy"
-    ok, msg = socks_apply(port, user, pwd)
-    await update.message.reply_text(msg)
-    return ConversationHandler.END
-
-async def socks_no_auth(query):
-    ok, msg = socks_apply(socks_get_port(), "", "")
-    await query.answer(msg, show_alert=True)
-    await show_socks_menu(query)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WHATSAPP PROXY
@@ -523,19 +407,14 @@ async def show_proxy_menu(query):
 
     if mtp_installed():
         st = _svc_status(MTP_SERVICE)
-        lines.append(f"{'🟢' if st['running'] else '🔴'} MTProxy{f' ({st[chr(117)ptime]})' if st['uptime'] else ''}")
+        lines.append(f"{'🟢' if st['running'] else '🔴'} MTProxy{f' ({st['uptime']})' if st['uptime'] else ''}")
     else:
         lines.append("⚫ MTProxy — не установлен")
 
-    if socks_installed():
-        st = _svc_status(SOCKS_SERVICE)
-        lines.append(f"{'🟢' if st['running'] else '🔴'} SOCKS5{f' ({st[chr(117)ptime]})' if st['uptime'] else ''}")
-    else:
-        lines.append("⚫ SOCKS5 — не установлен")
 
     if wa_docker_ok() and wa_installed():
         st = wa_status()
-        lines.append(f"{'🟢' if st['running'] else '🔴'} WhatsApp прокси{f' ({st[chr(117)ptime]})' if st['uptime'] else ''}")
+        lines.append(f"{'🟢' if st['running'] else '🔴'} WhatsApp прокси{f' ({st['uptime']})' if st['uptime'] else ''}")
     elif wa_docker_ok():
         lines.append("⚫ WhatsApp прокси — не установлен")
     else:
@@ -545,8 +424,7 @@ async def show_proxy_menu(query):
         "\n".join(lines),
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("📡 MTProxy",         callback_data="proxy_mtp_menu")],
-            [InlineKeyboardButton("🧦 SOCKS5",          callback_data="proxy_socks_menu")],
-            [InlineKeyboardButton("💬 WhatsApp прокси", callback_data="proxy_wa_menu")],
+                [InlineKeyboardButton("💬 WhatsApp прокси", callback_data="proxy_wa_menu")],
             [InlineKeyboardButton("🖥 Сервер",          callback_data="proxy_server")],
             [InlineKeyboardButton("🔄 Обновить",        callback_data="proxy_menu")],
             [InlineKeyboardButton("◀️ В меню",          callback_data="back")],
@@ -593,16 +471,6 @@ async def handle_proxy_callback(query, data: str, user_id: int, admin_id: int) -
         if ok: mtp_restart()
         await query.answer(msg, show_alert=True); await show_mtp_menu(query)
 
-    elif data == "proxy_socks_menu":    await show_socks_menu(query)
-    elif data == "proxy_socks_start":
-        ok, msg = socks_start();   await query.answer(msg, show_alert=not ok); await show_socks_menu(query)
-    elif data == "proxy_socks_stop":
-        ok, msg = socks_stop();    await query.answer(msg, show_alert=not ok); await show_socks_menu(query)
-    elif data == "proxy_socks_restart":
-        ok, msg = socks_restart(); await query.answer(msg, show_alert=not ok); await show_socks_menu(query)
-    elif data == "proxy_socks_edit":    await show_socks_edit(query)
-    elif data == "proxy_socks_no_auth": await socks_no_auth(query)
-
     elif data == "proxy_wa_menu":    await show_wa_menu(query)
     elif data == "proxy_wa_start":
         ok, msg = wa_start();   await query.answer(msg, show_alert=not ok); await show_wa_menu(query)
@@ -634,8 +502,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📡 Proxy Manager\n\n🌐 {get_server_ip()}",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("📡 MTProxy",         callback_data="proxy_mtp_menu")],
-            [InlineKeyboardButton("🧦 SOCKS5",          callback_data="proxy_socks_menu")],
-            [InlineKeyboardButton("💬 WhatsApp прокси", callback_data="proxy_wa_menu")],
+                [InlineKeyboardButton("💬 WhatsApp прокси", callback_data="proxy_wa_menu")],
             [InlineKeyboardButton("🖥 Сервер",          callback_data="proxy_server")],
         ])
     )
@@ -658,21 +525,6 @@ def main_standalone():
     app = Application.builder().token(conf["BOT_TOKEN"]).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(socks_edit_port_entry, pattern="^proxy_socks_edit_port$")],
-        states={
-            WAIT_SOCKS_PORT: [MessageHandler(filters.TEXT & ~filters.COMMAND, socks_receive_port)],
-            WAIT_SOCKS_PASS: [MessageHandler(filters.TEXT & ~filters.COMMAND, socks_receive_pass)],
-        },
-        fallbacks=[], per_chat=True,
-    ))
-    app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(socks_edit_pass_entry, pattern="^proxy_socks_edit_pass$")],
-        states={
-            WAIT_SOCKS_PASS: [MessageHandler(filters.TEXT & ~filters.COMMAND, socks_receive_pass)],
-        },
-        fallbacks=[], per_chat=True,
-    ))
     app.add_handler(CallbackQueryHandler(_button_handler))
 
     admin_id = int(conf.get("ADMIN_ID", 0))
