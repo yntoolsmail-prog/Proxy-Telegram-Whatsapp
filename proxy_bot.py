@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.0
+# Version: 1.1
 # proxy_bot.py — MTProxy + WhatsApp прокси
 # Режим: standalone (свой токен) или addon (импорт в bot.py)
 
@@ -185,9 +185,15 @@ def mtp_get_port()   -> str: return load_conf().get("MTP_PORT", "443")
 def mtp_build_link(secret: str, port: str, ip: str) -> str:
     return f"https://t.me/proxy?server={ip}&port={port}&secret={secret}"
 
-def mtp_generate_secret(fake_tls: bool = True) -> str:
+def mtp_generate_secret(mode: str = "ee") -> str:
+    """mode: ee | dd | plain"""
     raw = secrets.token_hex(16)
-    return ("dd" + raw) if fake_tls else raw
+    if mode == "ee":
+        domain_hex = "www.google.com".encode().hex()
+        return f"ee{raw}{domain_hex}"
+    elif mode == "dd":
+        return f"dd{raw}"
+    return raw
 
 def mtp_update_tg_configs() -> tuple[bool, str]:
     try:
@@ -204,10 +210,20 @@ def mtp_update_tg_configs() -> tuple[bool, str]:
         return False, f"❌ {e}"
 
 def _write_mtp_service(port: str, secret: str):
-    """secret должен быть чистым 32-символьным hex без префикса dd.
-    Для fake-TLS добавляем флаг -D google.com."""
+    """secret — полный секрет как хранится в конфиге (с префиксом ee/dd или без).
+    В -S флаг передаём чистые 32 hex символа без префикса.
+    Флаг -D выставляем для ee и dd режимов."""
     stored = load_conf().get("MTP_SECRET", "")
-    faketls = "-D google.com" if stored.startswith("dd") else ""
+    if stored.startswith("ee"):
+        # EE: чистый секрет — первые 32 символа после префикса
+        clean = stored[2:34]
+        faketls_flag = "-D www.google.com"
+    elif stored.startswith("dd"):
+        clean = stored[2:]
+        faketls_flag = "-D google.com"
+    else:
+        clean = stored
+        faketls_flag = ""
     with open(f"/etc/systemd/system/{MTP_SERVICE}.service", "w") as f:
         f.write(
             f"[Unit]\nDescription=MTProxy for Telegram\n"
@@ -216,8 +232,8 @@ def _write_mtp_service(port: str, secret: str):
             f"ExecStartPre=/bin/sh -c 'curl -sf https://core.telegram.org/getProxySecret"
             f" -o {MTP_SECRET_F}; curl -sf https://core.telegram.org/getProxyConfig"
             f" -o {MTP_MULTI_F}'\n"
-            f"ExecStart={MTP_BIN} -u nobody -p 8888 -H {port} -S {secret}"
-            f" {faketls} --aes-pwd {MTP_SECRET_F} {MTP_MULTI_F} -M 1\n"
+            f"ExecStart={MTP_BIN} -u nobody -p 8888 -H {port} -S {clean}"
+            f" {faketls_flag} --aes-pwd {MTP_SECRET_F} {MTP_MULTI_F} -M 1\n"
             f"Restart=on-failure\nRestartSec=10\n"
             f"StandardOutput=journal\nStandardError=journal\n\n"
             f"[Install]\nWantedBy=multi-user.target\n"
@@ -225,11 +241,10 @@ def _write_mtp_service(port: str, secret: str):
     subprocess.run(["systemctl", "daemon-reload"])
 
 def mtp_apply_secret(new_secret: str) -> tuple[bool, str]:
-    """new_secret может быть с префиксом dd (для ссылки) или без.
-    В systemd сервис передаём всегда чистые 32 символа без dd."""
+    """new_secret — полный секрет с префиксом (ee.../dd...) или без (plain).
+    Сохраняем как есть, в сервис передаём через _write_mtp_service."""
     save_conf({"MTP_SECRET": new_secret})
-    clean = new_secret[2:] if new_secret.startswith("dd") else new_secret
-    _write_mtp_service(mtp_get_port(), clean)
+    _write_mtp_service(mtp_get_port(), new_secret)
     return _svc_action(MTP_SERVICE, "restart", "🔄 MTProxy перезапущен с новым секретом")
 
 def mtp_start()   -> tuple[bool, str]: return _svc_action(MTP_SERVICE, "start",   "▶️ MTProxy запущен")
@@ -250,7 +265,12 @@ async def show_mtp_menu(query):
     port   = mtp_get_port()
     ip     = get_server_ip()
     link   = mtp_build_link(secret, port, ip) if secret and ip != "—" else "—"
-    mode   = "fake-TLS" if secret.startswith("dd") else "plain"
+    if secret.startswith("ee"):
+        mode = "EE (TLS 1.3)"
+    elif secret.startswith("dd"):
+        mode = "fake-TLS (DD)"
+    else:
+        mode = "plain"
     await query.edit_message_text(
         f"📡 MTProxy\n\n"
         f"Статус: {_status_line(st['running'], st['uptime'])}\n"
@@ -272,12 +292,14 @@ async def show_mtp_secret_ask(query):
     await query.edit_message_text(
         "🔑 Смена секрета MTProxy\n\n"
         "После смены все подключения оборвутся.\n\n"
-        "*fake-TLS* — маскировка под HTTPS (рекомендуется).\n"
-        "*plain* — без маскировки.",
+        "*EE* — имитирует TLS 1.3, сложнее всего обнаружить (рекомендуется).\n"
+        "*fake-TLS (DD)* — маскировка под HTTPS.\n"
+        "*plain* — без маскировки, только если EE и DD не работают.",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔐 fake-TLS (рекомендуется)", callback_data="proxy_mtp_secret_faketls")],
-            [InlineKeyboardButton("🔑 plain",                    callback_data="proxy_mtp_secret_plain")],
-            [InlineKeyboardButton("❌ Отмена",                   callback_data="proxy_mtp_menu")],
+            [InlineKeyboardButton("🔐 EE — TLS 1.3 (рекомендуется)", callback_data="proxy_mtp_secret_ee")],
+            [InlineKeyboardButton("🔑 fake-TLS (DD)",                 callback_data="proxy_mtp_secret_dd")],
+            [InlineKeyboardButton("🔓 plain",                         callback_data="proxy_mtp_secret_plain")],
+            [InlineKeyboardButton("❌ Отмена",                        callback_data="proxy_mtp_menu")],
         ]),
         parse_mode="Markdown"
     )
@@ -344,19 +366,37 @@ def wa_restart() -> tuple[bool, str]:
 
 def wa_update() -> tuple[bool, str]:
     try:
-        port = wa_get_port()
         subprocess.run(["docker", "stop", "whatsapp-proxy"], capture_output=True)
         subprocess.run(["docker", "rm",   "whatsapp-proxy"], capture_output=True)
-        subprocess.run(["docker", "pull", "ghcr.io/whatsapp/proxy:latest"], check=True, timeout=180)
+
+        # Пробуем Docker Hub, фоллбэк — пересборка из исходников
+        r_pull = subprocess.run(
+            ["docker", "pull", "facebook/whatsapp_proxy:latest"],
+            capture_output=True, timeout=180
+        )
+        if r_pull.returncode == 0:
+            image = "facebook/whatsapp_proxy:latest"
+        else:
+            wa_src = "/opt/whatsapp-proxy-src"
+            subprocess.run(
+                ["git", "-C", wa_src, "pull"] if os.path.exists(wa_src)
+                else ["git", "clone", "--depth=1", "https://github.com/WhatsApp/proxy", wa_src],
+                check=True, timeout=60
+            )
+            subprocess.run(
+                ["docker", "build", "-t", "whatsapp-proxy", f"{wa_src}/proxy"],
+                check=True, timeout=300
+            )
+            image = "whatsapp-proxy"
+
         r = subprocess.run([
             "docker", "run", "-d", "--name", "whatsapp-proxy", "--restart", "always",
-            "-p", f"{port}:443", "-p", f"{port}:80",
-            "-p", "5222:5222", "-p", "8080:8080", "-p", "8443:8443", "-p", "8888:8888",
-            "ghcr.io/whatsapp/proxy:latest"
+            "-p", "80:80", "-p", "443:443", "-p", "5222:5222",
+            image
         ], capture_output=True, text=True, timeout=30)
         return (True, "✅ Обновлён и перезапущен") if r.returncode == 0 else (False, f"❌ {r.stderr.strip()}")
     except subprocess.TimeoutExpired:
-        return False, "❌ Таймаут при скачивании образа"
+        return False, "❌ Таймаут при обновлении образа"
     except Exception as e:
         return False, f"❌ {e}"
 
@@ -378,13 +418,12 @@ async def show_wa_menu(query):
         )
         return
     st   = wa_status()
-    port = wa_get_port()
     ip   = get_server_ip()
     await query.edit_message_text(
         f"💬 WhatsApp прокси\n\n"
         f"Статус: {_status_line(st['running'], st['uptime'])}\n"
-        f"🌐 {ip}  |  Порт: {port}\n\n"
-        f"📱 Адрес для WhatsApp:\n`{ip}:{port}`\n\n"
+        f"🌐 {ip}  |  Порты: 80, 443, 5222\n\n"
+        f"📱 Адрес для WhatsApp:\n`{ip}:443`\n\n"
         f"_WhatsApp → Настройки → Конфиденциальность →_\n"
         f"_Расширенные → Использовать прокси_",
         reply_markup=InlineKeyboardMarkup([
@@ -460,8 +499,9 @@ async def handle_proxy_callback(query, data: str, user_id: int, admin_id: int) -
     elif data == "proxy_mtp_restart":
         ok, msg = mtp_restart(); await query.answer(msg, show_alert=not ok); await show_mtp_menu(query)
     elif data == "proxy_mtp_secret_ask": await show_mtp_secret_ask(query)
-    elif data in ("proxy_mtp_secret_faketls", "proxy_mtp_secret_plain"):
-        new_s = mtp_generate_secret(fake_tls=data.endswith("faketls"))
+    elif data in ("proxy_mtp_secret_ee", "proxy_mtp_secret_dd", "proxy_mtp_secret_plain"):
+        mode_map = {"proxy_mtp_secret_ee": "ee", "proxy_mtp_secret_dd": "dd", "proxy_mtp_secret_plain": "plain"}
+        new_s = mtp_generate_secret(mode_map[data])
         await query.edit_message_text("⏳ Применяю новый секрет...")
         ok, msg = mtp_apply_secret(new_s)
         await query.answer(msg, show_alert=True); await show_mtp_menu(query)
