@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.1
+# Version: 1.2
 # proxy_bot.py — MTProxy + WhatsApp прокси
 # Режим: standalone (свой токен) или addon (импорт в bot.py)
 
@@ -212,18 +212,18 @@ def mtp_update_tg_configs() -> tuple[bool, str]:
 def _write_mtp_service(port: str, secret: str):
     """secret — полный секрет как хранится в конфиге (с префиксом ee/dd или без).
     В -S флаг передаём чистые 32 hex символа без префикса.
-    Флаг -D выставляем для ee и dd режимов."""
+    Флаг -D только для EE — домен зашит прямо в секрете. DD работает без -D."""
     stored = load_conf().get("MTP_SECRET", "")
     if stored.startswith("ee"):
-        # EE: чистый секрет — первые 32 символа после префикса
-        clean = stored[2:34]
+        clean = stored[2:34]           # 32 hex символа после префикса ee
         faketls_flag = "-D www.google.com"
     elif stored.startswith("dd"):
-        clean = stored[2:]
-        faketls_flag = "-D google.com"
+        clean = stored[2:]             # 32 hex символа после префикса dd
+        faketls_flag = ""              # DD не использует -D
     else:
         clean = stored
         faketls_flag = ""
+    extra = f" {faketls_flag}" if faketls_flag else ""
     with open(f"/etc/systemd/system/{MTP_SERVICE}.service", "w") as f:
         f.write(
             f"[Unit]\nDescription=MTProxy for Telegram\n"
@@ -233,7 +233,7 @@ def _write_mtp_service(port: str, secret: str):
             f" -o {MTP_SECRET_F}; curl -sf https://core.telegram.org/getProxyConfig"
             f" -o {MTP_MULTI_F}'\n"
             f"ExecStart={MTP_BIN} -u nobody -p 8888 -H {port} -S {clean}"
-            f" {faketls_flag} --aes-pwd {MTP_SECRET_F} {MTP_MULTI_F} -M 1\n"
+            f"{extra} --aes-pwd {MTP_SECRET_F} {MTP_MULTI_F} -M 1\n"
             f"Restart=on-failure\nRestartSec=10\n"
             f"StandardOutput=journal\nStandardError=journal\n\n"
             f"[Install]\nWantedBy=multi-user.target\n"
@@ -251,7 +251,45 @@ def mtp_start()   -> tuple[bool, str]: return _svc_action(MTP_SERVICE, "start", 
 def mtp_stop()    -> tuple[bool, str]: return _svc_action(MTP_SERVICE, "stop",    "⏹ MTProxy остановлен")
 def mtp_restart() -> tuple[bool, str]: return _svc_action(MTP_SERVICE, "restart", "🔄 MTProxy перезапущен")
 
-async def show_mtp_menu(query):
+async def show_mtp_help(query):
+    await query.edit_message_text(
+        "📖 *MTProxy — инструкция*\n\n"
+        "*▶️ Старт / ⏹ Стоп*\n"
+        "Запускает или останавливает прокси. Пока остановлен — Telegram через него не работает ни у кого.\n\n"
+        "*🔄 Рестарт*\n"
+        "Перезапуск без смены настроек. Помогает если прокси завис или перестал отвечать.\n\n"
+        "*🔑 Сменить секрет*\n"
+        "Генерирует новый секрет и перезапускает прокси. Все подключённые пользователи отвалятся — нужно разослать новую ссылку.\n\n"
+        "*📥 Обновить конфиги TG*\n"
+        "Скачивает свежие конфиги с серверов Telegram. Если прокси работает но соединение нестабильное — попробуйте это.\n\n"
+        "*Как подключиться:*\n"
+        "• *Android:* Настройки → Данные и память → Прокси\n"
+        "• *ПК:* Настройки → Продвинутые настройки → Тип соединения\n"
+        "Или просто откройте ссылку из главного экрана MTProxy.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀️ Назад", callback_data="proxy_mtp_menu")]
+        ]),
+        parse_mode="Markdown"
+    )
+
+async def show_wa_help(query):
+    await query.edit_message_text(
+        "📖 *WhatsApp прокси — инструкция*\n\n"
+        "*▶️ Старт / ⏹ Стоп*\n"
+        "Запускает или останавливает контейнер. Пока остановлен — WhatsApp через него не работает.\n\n"
+        "*🔄 Рестарт*\n"
+        "Перезапуск контейнера. Помогает при зависании.\n\n"
+        "*⬆️ Обновить образ*\n"
+        "Скачивает свежую версию образа от Meta и перезапускает контейнер. Соединение прерывается на 1-2 минуты. Адрес подключения не меняется — повторно раздавать не нужно.\n\n"
+        "*Как подключиться:*\n"
+        "• *Android / iOS:* Настройки → Конфиденциальность → Расширенные → Использовать прокси\n"
+        "• Введите IP сервера и порт 443\n\n"
+        "⚠️ У WhatsApp прокси нет секрета — любой знающий IP может использовать его для подключения.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀️ Назад", callback_data="proxy_wa_menu")]
+        ]),
+        parse_mode="Markdown"
+    )
     if not mtp_installed():
         await query.edit_message_text(
             "⚫ MTProxy не установлен.\n\n"
@@ -282,6 +320,7 @@ async def show_mtp_menu(query):
              InlineKeyboardButton("🔄 Рестарт",           callback_data="proxy_mtp_restart")],
             [InlineKeyboardButton("🔑 Сменить секрет",    callback_data="proxy_mtp_secret_ask")],
             [InlineKeyboardButton("📥 Обновить конфиги TG", callback_data="proxy_mtp_update_cfg")],
+            [InlineKeyboardButton("📖 Инструкция",        callback_data="proxy_mtp_help")],
             [InlineKeyboardButton("🔄 Обновить",          callback_data="proxy_mtp_menu")],
             [InlineKeyboardButton("◀️ Назад",             callback_data="proxy_menu")],
         ]),
@@ -290,16 +329,32 @@ async def show_mtp_menu(query):
 
 async def show_mtp_secret_ask(query):
     await query.edit_message_text(
-        "🔑 Смена секрета MTProxy\n\n"
-        "После смены все подключения оборвутся.\n\n"
-        "*EE* — имитирует TLS 1.3, сложнее всего обнаружить (рекомендуется).\n"
-        "*fake-TLS (DD)* — маскировка под HTTPS.\n"
-        "*plain* — без маскировки, только если EE и DD не работают.",
+        "🔑 *Смена секрета MTProxy*\n\n"
+        "⚠️ *Внимание!* После смены секрета:\n"
+        "• Все подключённые пользователи отвалятся\n"
+        "• Старая ссылка перестанет работать\n"
+        "• Нужно разослать новую ссылку всем\n\n"
+        "Выберите тип нового секрета или отмените:",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🔐 EE — TLS 1.3 (рекомендуется)", callback_data="proxy_mtp_secret_ee")],
             [InlineKeyboardButton("🔑 fake-TLS (DD)",                 callback_data="proxy_mtp_secret_dd")],
             [InlineKeyboardButton("🔓 plain",                         callback_data="proxy_mtp_secret_plain")],
             [InlineKeyboardButton("❌ Отмена",                        callback_data="proxy_mtp_menu")],
+        ]),
+        parse_mode="Markdown"
+    )
+
+async def show_mtp_secret_confirm(query, mode: str):
+    mode_labels = {"ee": "EE (TLS 1.3)", "dd": "fake-TLS (DD)", "plain": "plain"}
+    label = mode_labels.get(mode, mode)
+    await query.edit_message_text(
+        f"🔑 *Подтверждение смены секрета*\n\n"
+        f"Тип: *{label}*\n\n"
+        f"❗ Все пользователи будут отключены.\n"
+        f"Вы уверены?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Да, сменить", callback_data=f"proxy_mtp_secret_confirm_{mode}")],
+            [InlineKeyboardButton("❌ Отмена",      callback_data="proxy_mtp_menu")],
         ]),
         parse_mode="Markdown"
     )
@@ -430,6 +485,7 @@ async def show_wa_menu(query):
             [_toggle_btn(st["running"], "proxy_wa_stop", "proxy_wa_start"),
              InlineKeyboardButton("🔄 Рестарт",       callback_data="proxy_wa_restart")],
             [InlineKeyboardButton("⬆️ Обновить образ", callback_data="proxy_wa_update")],
+            [InlineKeyboardButton("📖 Инструкция",     callback_data="proxy_wa_help")],
             [InlineKeyboardButton("🔄 Обновить",       callback_data="proxy_wa_menu")],
             [InlineKeyboardButton("◀️ Назад",          callback_data="proxy_menu")],
         ]),
@@ -501,10 +557,14 @@ async def handle_proxy_callback(query, data: str, user_id: int, admin_id: int) -
     elif data == "proxy_mtp_secret_ask": await show_mtp_secret_ask(query)
     elif data in ("proxy_mtp_secret_ee", "proxy_mtp_secret_dd", "proxy_mtp_secret_plain"):
         mode_map = {"proxy_mtp_secret_ee": "ee", "proxy_mtp_secret_dd": "dd", "proxy_mtp_secret_plain": "plain"}
-        new_s = mtp_generate_secret(mode_map[data])
+        await show_mtp_secret_confirm(query, mode_map[data])
+    elif data.startswith("proxy_mtp_secret_confirm_"):
+        mode = data.replace("proxy_mtp_secret_confirm_", "")
+        new_s = mtp_generate_secret(mode)
         await query.edit_message_text("⏳ Применяю новый секрет...")
         ok, msg = mtp_apply_secret(new_s)
         await query.answer(msg, show_alert=True); await show_mtp_menu(query)
+    elif data == "proxy_mtp_help": await show_mtp_help(query)
     elif data == "proxy_mtp_update_cfg":
         await query.edit_message_text("⏳ Загружаю конфиги Telegram...")
         ok, msg = mtp_update_tg_configs()
@@ -522,6 +582,7 @@ async def handle_proxy_callback(query, data: str, user_id: int, admin_id: int) -
         await query.edit_message_text("⏳ Обновляю образ...\nЭто займёт пару минут.")
         ok, msg = wa_update()
         await query.answer(msg, show_alert=True); await show_wa_menu(query)
+    elif data == "proxy_wa_help": await show_wa_help(query)
 
     else:
         return False
@@ -556,6 +617,45 @@ async def _button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data  = "proxy_menu" if query.data == "back" else query.data
     await handle_proxy_callback(query, data, user_id, admin)
 
+async def check_updates_job(context):
+    """Ежедневная проверка обновлений — уведомляет админа если есть новая версия."""
+    try:
+        import json, urllib.request
+        url = "https://api.github.com/repos/yntoolsmail-prog/Proxy-Telegram-Whatsapp/commits/main"
+        req = urllib.request.Request(url, headers={"User-Agent": "proxy-bot"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        latest_sha  = data["sha"][:7]
+        latest_msg  = data["commit"]["message"].split("\n")[0]
+        latest_date = data["commit"]["committer"]["date"][:10]
+
+        ver_file = "/root/.proxy_bot_version"
+        current = ""
+        try:
+            with open(ver_file) as f:
+                current = f.read().strip()
+        except:
+            pass
+
+        if current != latest_sha:
+            conf    = load_conf()
+            admin   = int(conf.get("ADMIN_ID", 0))
+            repo    = "https://github.com/yntoolsmail-prog/Proxy-Telegram-Whatsapp"
+            await context.bot.send_message(
+                chat_id=admin,
+                text=(
+                    f"🔔 *Доступно обновление Proxy Bot*\n\n"
+                    f"Текущая версия: `{current or 'неизвестна'}`\n"
+                    f"Новая версия:   `{latest_sha}` от {latest_date}\n\n"
+                    f"📝 {latest_msg}\n\n"
+                    f"[Посмотреть изменения]({repo}/commits/main)"
+                ),
+                parse_mode="Markdown",
+                disable_web_page_preview=True
+            )
+    except Exception as e:
+        logger.warning(f"Проверка обновлений не удалась: {e}")
+
 def main_standalone():
     conf = load_conf()
     if not conf.get("BOT_TOKEN"):
@@ -566,6 +666,14 @@ def main_standalone():
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(_button_handler))
+
+    # Ежедневная проверка обновлений в 10:00
+    import datetime as dt
+    app.job_queue.run_daily(
+        check_updates_job,
+        time=dt.time(hour=10, minute=0),
+        name="update_check"
+    )
 
     admin_id = int(conf.get("ADMIN_ID", 0))
     logger.info(f"Proxy Bot запущен. Admin: {admin_id}")
