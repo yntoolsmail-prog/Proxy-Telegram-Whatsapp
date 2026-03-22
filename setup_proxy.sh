@@ -3,7 +3,7 @@
 # Proxy Bot — установщик (MTProxy + WhatsApp прокси)
 # Использование: bash <(curl -s https://raw.githubusercontent.com/yntoolsmail-prog/Proxy-Telegram-Whatsapp/main/setup_proxy.sh)
 # =============================================================================
-# Version: 1.1
+# Version: 1.2
 
 set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -73,7 +73,7 @@ run() {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ШАГ 1: РЕЖИМ УСТАНОВКИ (standalone / addon)
+# ШАГ 1: РЕЖИМ
 # ══════════════════════════════════════════════════════════════════════════════
 sep "Режим установки"
 echo ""
@@ -209,7 +209,7 @@ apt-get install -y $APT_FLAGS curl git build-essential libssl-dev zlib1g-dev xxd
 if [[ "$INSTALL_MODE" == "standalone" ]]; then
     log "Установка python-telegram-bot..."
     pip3 install "python-telegram-bot[job-queue]>=22.0,<23" --break-system-packages > /dev/null || \
-    pip3 install "python-telegram-bot[job-queue]>=22.0,<23" > /dev/null || \
+    pip3 install "python-telegram-bot[job-queue]>=22.0,<23" --break-system-packages || \
     err "Не удалось установить python-telegram-bot."
 fi
 
@@ -253,28 +253,37 @@ if [[ "$INSTALL_MTP" == "true" ]]; then
     echo ""
     echo -e "  ${CYAN}${BOLD}Тип секрета (способ маскировки трафика)${NC}"
     echo ""
-    echo -e "  ${CYAN}1)${NC} ${BOLD}fake-TLS${NC} ${GREEN}(рекомендуется)${NC}"
-    echo -e "     Трафик выглядит как обычный HTTPS."
-    echo -e "     DPI и РКН не могут отличить от обычного сайта."
-    echo -e "     Значительно сложнее заблокировать."
+    echo -e "  ${CYAN}1)${NC} ${BOLD}EE mode${NC} ${GREEN}(рекомендуется)${NC}"
+    echo -e "     Имитирует TLS 1.3 — самый сложный для обнаружения."
     echo ""
-    echo -e "  ${CYAN}2)${NC} ${BOLD}plain${NC}"
-    echo -e "     Трафик выглядит как MTProxy — протокол виден."
-    echo -e "     Легче детектируется и блокируется."
-    echo -e "     Выбирайте только если fake-TLS не работает."
+    echo -e "  ${CYAN}2)${NC} ${BOLD}fake-TLS (DD mode)${NC}"
+    echo -e "     Трафик выглядит как обычный HTTPS."
+    echo ""
+    echo -e "  ${CYAN}3)${NC} ${BOLD}plain${NC}"
+    echo -e "     Трафик виден как MTProxy — легче блокируется."
+    echo -e "     Только если EE и DD не работают."
     echo ""
     while true; do
         read -p "  Тип секрета [1]: " ST; ST=${ST:-1}
-        [[ "$ST" == "1" || "$ST" == "2" ]] && break
+        [[ "$ST" == "1" || "$ST" == "2" || "$ST" == "3" ]] && break
     done
-    # Секрет — всегда 32 hex символа. Префикс dd добавляется только в ссылку для клиента,
-    # но НЕ передаётся в -S флаг бинарника (там строго 32 символа).
-    # Для fake-TLS используется флаг -D с доменом.
-    MTP_SECRET=$(head -c 16 /dev/urandom | xxd -ps)
-    [[ "$ST" == "1" ]] && SECRET_MODE="fake-TLS" || SECRET_MODE="plain"
-    # В конфиге и ссылке храним с dd чтобы Telegram понял режим
-    [[ "$ST" == "1" ]] && MTP_SECRET_STORE="dd${MTP_SECRET}" || MTP_SECRET_STORE="${MTP_SECRET}"
-    [[ "$ST" == "1" ]] && MTP_FAKETLS_FLAG="-D google.com" || MTP_FAKETLS_FLAG=""
+    RAW_SECRET=$(head -c 16 /dev/urandom | xxd -ps)
+    if [[ "$ST" == "1" ]]; then
+        SECRET_MODE="EE (TLS 1.3)"
+        # EE: ee + 32 hex + hex-encoded домен
+        DOMAIN_HEX=$(echo -n "www.google.com" | xxd -ps)
+        MTP_SECRET_STORE="ee${RAW_SECRET}${DOMAIN_HEX}"
+        MTP_FAKETLS_FLAG="-D www.google.com"
+    elif [[ "$ST" == "2" ]]; then
+        SECRET_MODE="fake-TLS (DD)"
+        MTP_SECRET_STORE="dd${RAW_SECRET}"
+        MTP_FAKETLS_FLAG="-D google.com"
+    else
+        SECRET_MODE="plain"
+        MTP_SECRET_STORE="${RAW_SECRET}"
+        MTP_FAKETLS_FLAG=""
+    fi
+    MTP_SECRET="${RAW_SECRET}"
 
     command -v ufw &>/dev/null && ufw allow "${MTP_PORT}/tcp" comment "MTProxy" 2>/dev/null || true
 
@@ -305,7 +314,7 @@ EOF
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ШАГ 7: WHATSAPP PROXY
+# ШАГ 6: WHATSAPP PROXY
 # ══════════════════════════════════════════════════════════════════════════════
 if [[ "$INSTALL_WA" == "true" ]]; then
     echo ""
@@ -322,34 +331,37 @@ if [[ "$INSTALL_WA" == "true" ]]; then
         warn "Docker уже установлен."
     fi
 
-    echo ""
-    while true; do
-        read -p "  Порт WhatsApp прокси [443]: " WA_PORT
-        WA_PORT=${WA_PORT:-443}
-        [[ "$WA_PORT" =~ ^[0-9]+$ && "$WA_PORT" -ge 1 && "$WA_PORT" -le 65535 ]] && break
-        warn "Введите корректный порт."
-    done
-
-    # Предупреждение если 443 занят MTProxy
-    if [[ "$INSTALL_MTP" == "true" && "$WA_PORT" == "$MTP_PORT" ]]; then
-        warn "Порт ${WA_PORT} уже занят MTProxy!"
-        read -p "  Введите другой порт для WhatsApp [8443]: " WA_PORT
-        WA_PORT=${WA_PORT:-8443}
+    # WhatsApp требует фиксированные порты 80, 443, 5222
+    # Порт 443 нельзя переназначать — клиент жёстко ожидает TLS на 443
+    if [[ "$INSTALL_MTP" == "true" && "$MTP_PORT" == "443" ]]; then
+        warn "MTProxy занимает порт 443 — WhatsApp прокси требует этот порт."
+        warn "Рекомендуется поменять порт MTProxy на другой (например 8443)."
+        read -p "  Продолжить всё равно? [y/N]: " WA_FORCE
+        [[ "${WA_FORCE,,}" != "y" ]] && { warn "WhatsApp прокси пропущен."; INSTALL_WA=false; }
     fi
 
     command -v ufw &>/dev/null && {
-        ufw allow "${WA_PORT}/tcp"  comment "WhatsApp proxy" 2>/dev/null || true
-        ufw allow 5222/tcp          comment "WhatsApp proxy" 2>/dev/null || true
-        ufw allow 8080/tcp          comment "WhatsApp proxy" 2>/dev/null || true
-        ufw allow 8443/tcp          comment "WhatsApp proxy" 2>/dev/null || true
-        ufw allow 8888/tcp          comment "WhatsApp proxy" 2>/dev/null || true
+        ufw allow 80/tcp   comment "WhatsApp proxy" 2>/dev/null || true
+        ufw allow 443/tcp  comment "WhatsApp proxy" 2>/dev/null || true
+        ufw allow 5222/tcp comment "WhatsApp proxy" 2>/dev/null || true
     }
 
-    printf "WA_PORT=%s\n" "$WA_PORT" >> "$CONF_FILE"
+    printf "WA_PORT=443\n" >> "$CONF_FILE"
 
     log "Скачиваю образ WhatsApp прокси..."
-    docker pull ghcr.io/whatsapp/proxy:latest \
-        || err "Не удалось скачать образ. Проверьте доступ к ghcr.io."
+    if docker pull facebook/whatsapp_proxy:latest 2>/dev/null; then
+        WA_IMAGE="facebook/whatsapp_proxy:latest"
+        log "Образ загружен с Docker Hub ✓"
+    else
+        warn "Docker Hub недоступен — собираю из исходников..."
+        WA_SRC="/opt/whatsapp-proxy-src"
+        rm -rf "$WA_SRC"
+        git clone --depth=1 https://github.com/WhatsApp/proxy "$WA_SRC" \
+            || err "Не удалось скачать исходники WhatsApp proxy."
+        run "docker build -t whatsapp-proxy '$WA_SRC/proxy'"
+        WA_IMAGE="whatsapp-proxy"
+        log "Образ собран из исходников ✓"
+    fi
 
     # Удаляем старый контейнер если есть
     docker rm -f whatsapp-proxy 2>/dev/null || true
@@ -358,13 +370,10 @@ if [[ "$INSTALL_WA" == "true" ]]; then
     docker run -d \
         --name whatsapp-proxy \
         --restart always \
-        -p "${WA_PORT}:443" \
-        -p "${WA_PORT}:80" \
+        -p "80:80" \
+        -p "443:443" \
         -p "5222:5222" \
-        -p "8080:8080" \
-        -p "8443:8443" \
-        -p "8888:8888" \
-        ghcr.io/whatsapp/proxy:latest
+        "$WA_IMAGE"
 
     sleep 3
     if docker ps --filter "name=whatsapp-proxy" --filter "status=running" | grep -q whatsapp; then
@@ -373,6 +382,66 @@ if [[ "$INSTALL_WA" == "true" ]]; then
         warn "Контейнер не запустился — docker logs whatsapp-proxy"
     fi
 fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ШАГ 7: ЧАСОВОЙ ПОЯС
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+sep "Часовой пояс"
+echo ""
+echo -e "  Используется для корректного отображения времени в логах бота."
+echo ""
+SYS_TZ=$(cat /etc/timezone 2>/dev/null || timedatectl | grep "Time zone" | awk '{print $3}')
+SYS_TZ=${SYS_TZ:-UTC}
+echo -e "  Текущий часовой пояс сервера: ${CYAN}${SYS_TZ}${NC}"
+echo ""
+echo -e "  ${CYAN}1)${NC} Europe/Moscow      — Москва (UTC+3)"
+echo -e "  ${CYAN}2)${NC} Asia/Yekaterinburg — Екатеринбург (UTC+5)"
+echo -e "  ${CYAN}3)${NC} Asia/Novosibirsk   — Новосибирск (UTC+7)"
+echo -e "  ${CYAN}4)${NC} Asia/Vladivostok   — Владивосток (UTC+10)"
+echo -e "  ${CYAN}5)${NC} Europe/Kiev        — Киев (UTC+2)"
+echo -e "  ${CYAN}6)${NC} Asia/Almaty        — Алматы (UTC+5)"
+echo -e "  ${CYAN}7)${NC} Europe/Berlin      — Берлин (UTC+1/2)"
+echo -e "  ${CYAN}8)${NC} UTC"
+echo -e "  ${CYAN}9)${NC} Использовать пояс сервера ${CYAN}(${SYS_TZ})${NC}"
+echo -e "  ${CYAN}0)${NC} Ввести вручную"
+echo ""
+while true; do
+    read -p "  Ваш выбор [9]: " TZ_CHOICE
+    TZ_CHOICE=${TZ_CHOICE:-9}
+    [[ "$TZ_CHOICE" =~ ^[0-9]$ ]] && break
+    warn "Введите число от 0 до 9."
+done
+case "$TZ_CHOICE" in
+    1) TIMEZONE="Europe/Moscow" ;;
+    2) TIMEZONE="Asia/Yekaterinburg" ;;
+    3) TIMEZONE="Asia/Novosibirsk" ;;
+    4) TIMEZONE="Asia/Vladivostok" ;;
+    5) TIMEZONE="Europe/Kiev" ;;
+    6) TIMEZONE="Asia/Almaty" ;;
+    7) TIMEZONE="Europe/Berlin" ;;
+    8) TIMEZONE="UTC" ;;
+    9) TIMEZONE="$SYS_TZ" ;;
+    0)
+        echo ""
+        echo -e "  Примеры: Europe/Moscow, Asia/Tokyo, America/New_York"
+        echo -e "  Полный список: timedatectl list-timezones"
+        echo ""
+        while true; do
+            read -p "  Введите часовой пояс: " TIMEZONE
+            TIMEZONE="${TIMEZONE// /}"
+            [[ -z "$TIMEZONE" ]] && warn "Пояс не может быть пустым." && continue
+            if timedatectl list-timezones 2>/dev/null | grep -qx "$TIMEZONE"; then
+                break
+            else
+                warn "Пояс '${TIMEZONE}' не найден. Проверьте написание."
+            fi
+        done
+        ;;
+esac
+timedatectl set-timezone "$TIMEZONE" 2>/dev/null || true
+printf "TIMEZONE=%s\n" "$TIMEZONE" >> "$CONF_FILE"
+info "Часовой пояс: ${TIMEZONE}"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ШАГ 8: СКАЧИВАЕМ proxy_bot.py
@@ -468,67 +537,7 @@ PYEOF
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ШАГ 10: ЧАСОВОЙ ПОЯС
-# ══════════════════════════════════════════════════════════════════════════════
-echo ""
-sep "Часовой пояс"
-echo ""
-echo -e "  Используется для корректного отображения времени в логах бота."
-echo ""
-SYS_TZ=$(cat /etc/timezone 2>/dev/null || timedatectl | grep "Time zone" | awk '{print $3}')
-SYS_TZ=${SYS_TZ:-UTC}
-echo -e "  Текущий часовой пояс сервера: ${CYAN}${SYS_TZ}${NC}"
-echo ""
-echo -e "  ${CYAN}1)${NC} Europe/Moscow      — Москва (UTC+3)"
-echo -e "  ${CYAN}2)${NC} Asia/Yekaterinburg — Екатеринбург (UTC+5)"
-echo -e "  ${CYAN}3)${NC} Asia/Novosibirsk   — Новосибирск (UTC+7)"
-echo -e "  ${CYAN}4)${NC} Asia/Vladivostok   — Владивосток (UTC+10)"
-echo -e "  ${CYAN}5)${NC} Europe/Kiev        — Киев (UTC+2)"
-echo -e "  ${CYAN}6)${NC} Asia/Almaty        — Алматы (UTC+5)"
-echo -e "  ${CYAN}7)${NC} Europe/Berlin      — Берлин (UTC+1/2)"
-echo -e "  ${CYAN}8)${NC} UTC"
-echo -e "  ${CYAN}9)${NC} Использовать пояс сервера ${CYAN}(${SYS_TZ})${NC}"
-echo -e "  ${CYAN}0)${NC} Ввести вручную"
-echo ""
-while true; do
-    read -p "  Ваш выбор [9]: " TZ_CHOICE
-    TZ_CHOICE=${TZ_CHOICE:-9}
-    [[ "$TZ_CHOICE" =~ ^[0-9]$ ]] && break
-    warn "Введите число от 0 до 9."
-done
-case "$TZ_CHOICE" in
-    1) TIMEZONE="Europe/Moscow" ;;
-    2) TIMEZONE="Asia/Yekaterinburg" ;;
-    3) TIMEZONE="Asia/Novosibirsk" ;;
-    4) TIMEZONE="Asia/Vladivostok" ;;
-    5) TIMEZONE="Europe/Kiev" ;;
-    6) TIMEZONE="Asia/Almaty" ;;
-    7) TIMEZONE="Europe/Berlin" ;;
-    8) TIMEZONE="UTC" ;;
-    9) TIMEZONE="$SYS_TZ" ;;
-    0)
-        echo ""
-        echo -e "  Примеры: Europe/Moscow, Asia/Tokyo, America/New_York"
-        echo -e "  Полный список: timedatectl list-timezones"
-        echo ""
-        while true; do
-            read -p "  Введите часовой пояс: " TIMEZONE
-            TIMEZONE="${TIMEZONE// /}"
-            [[ -z "$TIMEZONE" ]] && warn "Пояс не может быть пустым." && continue
-            if timedatectl list-timezones 2>/dev/null | grep -qx "$TIMEZONE"; then
-                break
-            else
-                warn "Пояс '${TIMEZONE}' не найден. Проверьте написание."
-            fi
-        done
-        ;;
-esac
-timedatectl set-timezone "$TIMEZONE" 2>/dev/null || true
-printf "TIMEZONE=%s\n" "$TIMEZONE" >> "$CONF_FILE"
-info "Часовой пояс: ${TIMEZONE}"
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ШАГ 11: СКРИПТ ОБНОВЛЕНИЯ
+# ШАГ 10: СКРИПТ ОБНОВЛЕНИЯ
 # ══════════════════════════════════════════════════════════════════════════════
 log "Создаём update_proxy.sh..."
 cat > /root/update_proxy.sh << 'UPDATEEOF'
