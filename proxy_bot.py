@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-# Version: 1.2
-# proxy_bot.py — MTProxy + WhatsApp прокси
-# Режим: standalone (свой токен) или addon (импорт в bot.py)
+# Version: 2.0
+# proxy_bot.py — MTProxy + WhatsApp прокси с управлением через Telegram бота
 
 import os, subprocess, time, secrets, logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -89,7 +88,7 @@ def setup_interactive():
     except:
         print()
         ip = input("  Введите IP сервера: ").strip()
-    save_conf({"BOT_TOKEN": token, "ADMIN_ID": admin_id, "SERVER_IP": ip, "MODE": "standalone"})
+    save_conf({"BOT_TOKEN": token, "ADMIN_ID": admin_id, "SERVER_IP": ip})
     print(f"\n  {G}Готово!{NC}\n")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -538,7 +537,7 @@ async def show_server(query):
     )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ГЛАВНЫЙ РОУТЕР — используется и standalone и addon
+# ГЛАВНЫЙ РОУТЕР
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def handle_proxy_callback(query, data: str, user_id: int, admin_id: int) -> bool:

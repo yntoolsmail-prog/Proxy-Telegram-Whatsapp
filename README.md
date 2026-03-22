@@ -6,17 +6,16 @@
 
 ## Возможности
 
-- **MTProxy** — официальный прокси-протокол Telegram. Режим *fake-TLS* маскирует трафик под обычный HTTPS — DPI не отличает от браузера. Нативная поддержка в клиентах Telegram, не требует сторонних приложений
-- **WhatsApp прокси** — официальный контейнер от Meta. Встроенная поддержка в WhatsApp начиная с версии 2.22.x
-- **Telegram бот** — управление всеми прокси из одного интерфейса: статус, запуск/остановка, смена секрета, ссылки для подключения
-- **Два режима установки** — отдельный бот или встроенный раздел в [AmneziaWG бота](https://github.com/yntoolsmail-prog/Vpn_AWG)
-- **Автообновление** — бот обновляется из репозитория автоматически
+- **MTProxy** — официальный прокси-протокол Telegram. Режимы *EE (TLS 1.3)* и *fake-TLS* маскируют трафик под обычный HTTPS — DPI не отличает от браузера. Нативная поддержка в клиентах Telegram, не требует сторонних приложений
+- **WhatsApp прокси** — официальный образ от Meta. Встроенная поддержка в WhatsApp начиная с версии 2.22.x
+- **Telegram бот** — управление всеми прокси из одного интерфейса: статус, запуск/остановка, смена секрета, ссылки для подключения, инструкции
+- **Уведомления об обновлениях** — бот ежедневно проверяет репозиторий и сообщает если появилась новая версия
 
 ## Требования
 
 - Ubuntu 22.04 или 24.04
 - VPS с root доступом
-- Telegram бот (получить у @BotFather) — только для standalone режима
+- Telegram бот (получить у @BotFather)
 
 ## Установка
 
@@ -26,29 +25,13 @@ bash <(curl -s https://raw.githubusercontent.com/yntoolsmail-prog/Proxy-Telegram
 
 Установщик спросит:
 
-1. **Режим** — отдельный бот или встроить в существующий AmneziaWG бот (если обнаружен на сервере)
+1. **Режим вывода** — тихий или подробный
 2. **Прокси** — MTProxy, WhatsApp прокси или оба
-3. **Порт и параметры** для каждого выбранного прокси
-4. **Автообновление** бота
+3. **Порт и тип секрета** для MTProxy (EE / fake-TLS / plain)
+4. **Токен бота** и Telegram ID администратора
+5. **Часовой пояс** для корректного отображения времени в логах
 
 > ⚠️ WhatsApp прокси требует Docker (~200 MB установка, ~50 MB RAM постоянно)
-
----
-
-## Режимы установки
-
-### Standalone
-
-Отдельный бот с новым токеном. Работает независимо от других сервисов. Управляется командой `/start`.
-
-```
-systemctl status proxy-bot
-journalctl -u proxy-bot -f
-```
-
-### Addon
-
-Встраивается в существующего [AmneziaWG бота](https://github.com/yntoolsmail-prog/Vpn_AWG). Установщик автоматически обнаруживает бота на сервере и добавляет кнопку **📡 Прокси** в меню администратора. Отдельный токен не нужен.
 
 ---
 
@@ -56,48 +39,36 @@ journalctl -u proxy-bot -f
 
 ### MTProxy (Telegram)
 
-Telegram → Настройки → Данные и память → Тип соединения → Добавить прокси → MTProxy
+- **Android:** Настройки → Данные и память → Прокси
+- **ПК:** Настройки → Продвинутые настройки → Тип соединения
 
-Или перейти по ссылке вида:
-```
-https://t.me/proxy?server=ВАШ_IP&port=443&secret=ВАШ_СЕКРЕТ
-```
+Или перейти по ссылке из бота — она откроет Telegram и добавит прокси автоматически.
 
-### WhatsApp прокси (WhatsApp)
+### WhatsApp прокси
 
 WhatsApp → Настройки → Конфиденциальность → Расширенные → Использовать прокси
 
+Введите IP сервера и порт 443.
+
 ---
 
-## Где смотреть параметры подключения
+## Управление через бота
 
-Все параметры сохраняются при установке:
+Напишите `/start` боту в Telegram. Доступно:
 
-```bash
-cat /etc/proxy-bot/proxy_bot.env
-```
+**MTProxy:**
+- Старт / стоп / рестарт
+- Смена секрета (EE / fake-TLS / plain) с подтверждением
+- Обновление конфигов Telegram
+- Текущая ссылка для подключения
 
-Пример вывода:
-```
-ADMIN_ID=123456789
-SERVER_IP=1.2.3.4
-MODE=addon
-MTP_PORT=443
-MTP_SECRET=dd865cfe7e9805354e7b04ae4031200053
-WA_PORT=443
-```
+**WhatsApp прокси:**
+- Старт / стоп / рестарт
+- Обновление образа от Meta
+- Адрес для подключения
 
-**MTProxy** — авторизации нет, только секрет в ссылке. Если потеряли ссылку:
-```bash
-source /etc/proxy-bot/proxy_bot.env
-echo "https://t.me/proxy?server=${SERVER_IP}&port=${MTP_PORT}&secret=${MTP_SECRET}"
-```
-
-**WhatsApp прокси** — авторизации нет. В WhatsApp вводите только IP и порт:
-```bash
-source /etc/proxy-bot/proxy_bot.env
-echo "${SERVER_IP}:${WA_PORT}"
-```
+**Сервер:**
+- RAM, диск, load average, аптайм
 
 ---
 
@@ -114,26 +85,26 @@ docker ps
 docker restart whatsapp-proxy
 docker logs whatsapp-proxy -f
 
-# Standalone бот
+# Бот
 systemctl status proxy-bot
 journalctl -u proxy-bot -f
 
-# Addon режим (бот AmneziaWG)
-systemctl status awg-bot
-journalctl -u awg-bot -f
-
 # Обновить вручную
-bash /root/update_proxy.sh
+curl -sf https://raw.githubusercontent.com/yntoolsmail-prog/Proxy-Telegram-Whatsapp/main/proxy_bot.py \
+    -o /root/proxy_bot.py && systemctl restart proxy-bot
 
-# Лог обновлений
-cat /var/log/proxy-bot-update.log
+# Параметры подключения
+cat /etc/proxy-bot/proxy_bot.env
 ```
 
 ---
 
-## Связанные проекты
+## Восстановление ссылки MTProxy
 
-Этот репозиторий является дополнением к **[Vpn_AWG](https://github.com/yntoolsmail-prog/Vpn_AWG)** — VPN-серверу на базе AmneziaWG с управлением через Telegram бота.
+```bash
+source /etc/proxy-bot/proxy_bot.env
+echo "https://t.me/proxy?server=${SERVER_IP}&port=${MTP_PORT}&secret=${MTP_SECRET}"
+```
 
 ---
 
@@ -143,11 +114,7 @@ cat /var/log/proxy-bot-update.log
 bash <(curl -s https://raw.githubusercontent.com/yntoolsmail-prog/Proxy-Telegram-Whatsapp/main/uninstall_proxy.sh)
 ```
 
-Скрипт определяет что установлено на сервере и предлагает два варианта:
-
-**1) Удалить только прокси** — останавливает и удаляет MTProxy, WhatsApp прокси и все их файлы. Если использовался addon режим — автоматически откатывает патч `bot.py` и перезапускает AWG бота. AmneziaWG VPN не затрагивается.
-
-**2) Удалить всё** — дополнительно удаляет AmneziaWG бота, все VPN конфиги и ключи клиентов. Необратимо.
+Скрипт останавливает и удаляет MTProxy, WhatsApp прокси, бота и все их файлы.
 
 > Docker если был установлен для WhatsApp прокси — намеренно оставляется, так как мог использоваться до установки прокси.
 
@@ -155,10 +122,8 @@ bash <(curl -s https://raw.githubusercontent.com/yntoolsmail-prog/Proxy-Telegram
 
 ## Благодарности
 
-Проект использует следующие открытые решения:
-
 - [GetPageSpeed/MTProxy](https://github.com/GetPageSpeed/MTProxy) — форк MTProxy с исправлением краша на серверах с PID > 65535 (GPLv2)
-- [WhatsApp/proxy](https://github.com/WhatsApp/proxy) — официальный прокси от Meta (MIT)
+- [facebook/whatsapp_proxy](https://hub.docker.com/r/facebook/whatsapp_proxy) — официальный образ от Meta (MIT)
 - [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) — библиотека для Telegram Bot API (LGPLv3)
 
 Код в этом репозитории распространяется под лицензией [MIT](LICENSE).
