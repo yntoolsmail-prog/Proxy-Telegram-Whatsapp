@@ -3,7 +3,7 @@
 # Proxy Bot — установщик (MTProxy + WhatsApp прокси)
 # Использование: bash <(curl -s https://raw.githubusercontent.com/yntoolsmail-prog/Proxy-Telegram-Whatsapp/main/setup_proxy.sh)
 # =============================================================================
-# Version: 1.2
+# Version: 1.3
 
 set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -538,39 +538,13 @@ PYEOF
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ШАГ 10: СКРИПТ ОБНОВЛЕНИЯ
+# ШАГ 10: СОХРАНЯЕМ ТЕКУЩУЮ ВЕРСИЮ
 # ══════════════════════════════════════════════════════════════════════════════
-log "Создаём update_proxy.sh..."
-cat > /root/update_proxy.sh << 'UPDATEEOF'
-#!/bin/bash
-RAW="https://raw.githubusercontent.com/yntoolsmail-prog/Proxy-Telegram-Whatsapp/main"
-VER_FILE="/root/.proxy_bot_version"
-CURRENT=$(cat "$VER_FILE" 2>/dev/null || echo "none")
-LATEST=$(curl -s "https://api.github.com/repos/yntoolsmail-prog/Proxy-Telegram-Whatsapp/commits/main" \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'][:7])" 2>/dev/null)
-[[ -z "$LATEST" || "$CURRENT" == "$LATEST" ]] && exit 0
-curl -sf "$RAW/proxy_bot.py" -o /root/proxy_bot.py || exit 1
-echo "$LATEST" > "$VER_FILE"
-MODE=$(grep '^MODE=' /etc/proxy-bot/proxy_bot.env 2>/dev/null | cut -d= -f2)
-[[ "$MODE" == "standalone" ]] && systemctl restart proxy-bot || systemctl restart awg-bot
-echo "$(date) — proxy_bot обновлён до $LATEST" >> /var/log/proxy-bot-update.log
-UPDATEEOF
-chmod +x /root/update_proxy.sh
-
-echo ""
-echo -e "  ${CYAN}1)${NC} Включить автообновление ${GREEN}(рекомендуется)${NC}"
-echo -e "  ${CYAN}2)${NC} Не включать"
-echo ""
-while true; do
-    read -p "  Автообновление proxy_bot.py [1]: " AU; AU=${AU:-1}
-    [[ "$AU" == "1" || "$AU" == "2" ]] && break
-done
-if [[ "$AU" == "1" ]]; then
-    (crontab -l 2>/dev/null; echo "*/15 * * * * /root/update_proxy.sh") | crontab -
-    AU_STATUS="${GREEN}активно (каждые 15 минут)${NC}"
-else
-    AU_STATUS="${YELLOW}отключено${NC}"
-fi
+# Запоминаем текущий коммит — бот будет сравнивать с ним при ежедневной проверке
+CURRENT_SHA=$(curl -s "https://api.github.com/repos/yntoolsmail-prog/Proxy-Telegram-Whatsapp/commits/main" \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'][:7])" 2>/dev/null || echo "unknown")
+echo "$CURRENT_SHA" > /root/.proxy_bot_version
+info "Версия бота: ${CURRENT_SHA}"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ИТОГ
@@ -584,15 +558,15 @@ info "Режим: ${INSTALL_MODE}"
 echo ""
 
 if [[ "$INSTALL_MTP" == "true" ]]; then
-    MTP_LINK="https://t.me/proxy?server=${SERVER_IP}&port=${MTP_PORT}&secret=${MTP_SECRET}"
+    MTP_LINK="https://t.me/proxy?server=${SERVER_IP}&port=${MTP_PORT}&secret=${MTP_SECRET_STORE}"
     echo -e "  ${CYAN}📡 MTProxy${NC} (${SECRET_MODE})  порт ${MTP_PORT}"
     echo -e "  ${GREEN}${MTP_LINK}${NC}"
     echo ""
 fi
 
 if [[ "$INSTALL_WA" == "true" ]]; then
-    echo -e "  ${CYAN}💬 WhatsApp прокси${NC}  порт ${WA_PORT}"
-    echo -e "  Адрес для WhatsApp: ${GREEN}${SERVER_IP}:${WA_PORT}${NC}"
+    echo -e "  ${CYAN}💬 WhatsApp прокси${NC}  порты 80, 443, 5222"
+    echo -e "  Адрес для WhatsApp: ${GREEN}${SERVER_IP}:443${NC}"
     echo ""
 fi
 
@@ -600,9 +574,9 @@ if [[ "$INSTALL_MODE" == "standalone" ]]; then
     info "Статус: systemctl status proxy-bot"
     info "Логи:   journalctl -u proxy-bot -f"
     echo -e "  Напишите ${CYAN}/start${NC} боту в Telegram"
+    info "Бот будет уведомлять об обновлениях ежедневно в 10:00"
 else
     echo -e "  Кнопка ${CYAN}📡 Прокси${NC} добавлена в меню AmneziaWG бота"
 fi
 echo ""
-info "Автообновление: ${AU_STATUS}"
 echo ""
