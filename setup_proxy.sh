@@ -3,9 +3,12 @@
 # Proxy Bot — установщик (MTProxy + WhatsApp прокси)
 # Использование: bash <(curl -s https://raw.githubusercontent.com/yntoolsmail-prog/Proxy-Telegram-Whatsapp/main/setup_proxy.sh)
 # =============================================================================
-# Version: 1.0
+# Version: 1.1
 
 set -e
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 log()  { echo -e "${GREEN}[+]${NC} $1"; }
 warn() { echo -e "${YELLOW}[!]${NC} $1"; }
@@ -40,7 +43,37 @@ if [[ -f /etc/amnezia/amneziawg/bot.env && -f "$AWG_BOT_FILE" ]]; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ШАГ 1: РЕЖИМ
+# РЕЖИМ ВЫВОДА (тихий / подробный)
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo -e "  ${CYAN}1)${NC} Тихая установка     — только ключевые шаги ${GREEN}(рекомендуется)${NC}"
+echo -e "  ${CYAN}2)${NC} Подробная установка — показывать все процессы"
+echo ""
+while true; do
+    read -p "  Ваш выбор [1]: " VERBOSE_MODE
+    VERBOSE_MODE=${VERBOSE_MODE:-1}
+    [[ "$VERBOSE_MODE" == "1" || "$VERBOSE_MODE" == "2" ]] && break
+    warn "Введите 1 или 2."
+done
+if [[ "$VERBOSE_MODE" == "1" ]]; then
+    APT_FLAGS="-qq"
+    info "Режим: тихая установка"
+else
+    APT_FLAGS=""
+    info "Режим: подробная установка"
+fi
+
+# Хелпер — в тихом режиме прячет stdout, stderr всегда виден
+run() {
+    if [[ "$VERBOSE_MODE" == "1" ]]; then
+        eval "$@" > /dev/null
+    else
+        eval "$@"
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ШАГ 1: РЕЖИМ УСТАНОВКИ (standalone / addon)
 # ══════════════════════════════════════════════════════════════════════════════
 sep "Режим установки"
 echo ""
@@ -141,10 +174,16 @@ if [[ "$INSTALL_MODE" == "standalone" ]]; then
     done
     echo ""
     log "Определяю IP сервера..."
-    SERVER_IP=$(curl -sf --max-time 10 https://api.ipify.org 2>/dev/null || \
-                curl -sf --max-time 10 https://ifconfig.me  2>/dev/null || echo "")
-    if [[ -z "$SERVER_IP" ]]; then
-        read -p "  Не удалось определить. Введите IP: " SERVER_IP
+    SERVER_IP=$(curl -4 -sf --max-time 10 https://ifconfig.me 2>/dev/null || \
+                curl -4 -sf --max-time 10 https://api.ipify.org 2>/dev/null || \
+                curl -4 -sf --max-time 10 https://ifconfig.co 2>/dev/null || echo "")
+    if [[ -z "$SERVER_IP" ]] || [[ "$SERVER_IP" == *":"* ]]; then
+        warn "Не удалось автоматически определить внешний IPv4."
+        while true; do
+            read -p "  Введите внешний IPv4 сервера: " SERVER_IP
+            [[ "$SERVER_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && break
+            warn "Неверный формат. Введите IPv4, например: 185.123.45.67"
+        done
     else
         info "IP: ${SERVER_IP}"
     fi
@@ -163,14 +202,14 @@ fi
 # ШАГ 4: ЗАВИСИМОСТИ
 # ══════════════════════════════════════════════════════════════════════════════
 log "Установка зависимостей..."
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq curl git build-essential libssl-dev zlib1g-dev xxd
+apt-get update $APT_FLAGS
+apt-get install -y $APT_FLAGS curl git build-essential libssl-dev zlib1g-dev xxd \
+    python3 python3-pip software-properties-common
 
 if [[ "$INSTALL_MODE" == "standalone" ]]; then
     log "Установка python-telegram-bot..."
-    pip3 install "python-telegram-bot[job-queue]>=22.0,<23" --break-system-packages -q || \
-    pip3 install "python-telegram-bot[job-queue]>=22.0,<23" -q || \
+    pip3 install "python-telegram-bot[job-queue]>=22.0,<23" --break-system-packages > /dev/null || \
+    pip3 install "python-telegram-bot[job-queue]>=22.0,<23" > /dev/null || \
     err "Не удалось установить python-telegram-bot."
 fi
 
@@ -186,12 +225,11 @@ if [[ "$INSTALL_MTP" == "true" ]]; then
     else
         log "Клонирование MTProxy (GetPageSpeed fork)..."
         rm -rf "$MTP_DIR"
-        # Используем форк GetPageSpeed — исправлен краш на серверах с PID > 65535
-        # Оригинальный TelegramMessenger/MTProxy падает на таких серверах
         git clone --depth=1 https://github.com/GetPageSpeed/MTProxy "$MTP_DIR" \
             || err "Не удалось скачать MTProxy."
         log "Сборка (~1-2 минуты)..."
-        cd "$MTP_DIR" && make -j$(nproc) 2>&1 | tail -3 && cd /root
+        run "cd '$MTP_DIR' && make -j\$(nproc)"
+        cd /root
         [[ -f "$MTP_BIN" ]] || err "Сборка не удалась."
         log "Собран ✓"
     fi
@@ -430,7 +468,67 @@ PYEOF
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ШАГ 10: СКРИПТ ОБНОВЛЕНИЯ
+# ШАГ 10: ЧАСОВОЙ ПОЯС
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+sep "Часовой пояс"
+echo ""
+echo -e "  Используется для корректного отображения времени в логах бота."
+echo ""
+SYS_TZ=$(cat /etc/timezone 2>/dev/null || timedatectl | grep "Time zone" | awk '{print $3}')
+SYS_TZ=${SYS_TZ:-UTC}
+echo -e "  Текущий часовой пояс сервера: ${CYAN}${SYS_TZ}${NC}"
+echo ""
+echo -e "  ${CYAN}1)${NC} Europe/Moscow      — Москва (UTC+3)"
+echo -e "  ${CYAN}2)${NC} Asia/Yekaterinburg — Екатеринбург (UTC+5)"
+echo -e "  ${CYAN}3)${NC} Asia/Novosibirsk   — Новосибирск (UTC+7)"
+echo -e "  ${CYAN}4)${NC} Asia/Vladivostok   — Владивосток (UTC+10)"
+echo -e "  ${CYAN}5)${NC} Europe/Kiev        — Киев (UTC+2)"
+echo -e "  ${CYAN}6)${NC} Asia/Almaty        — Алматы (UTC+5)"
+echo -e "  ${CYAN}7)${NC} Europe/Berlin      — Берлин (UTC+1/2)"
+echo -e "  ${CYAN}8)${NC} UTC"
+echo -e "  ${CYAN}9)${NC} Использовать пояс сервера ${CYAN}(${SYS_TZ})${NC}"
+echo -e "  ${CYAN}0)${NC} Ввести вручную"
+echo ""
+while true; do
+    read -p "  Ваш выбор [9]: " TZ_CHOICE
+    TZ_CHOICE=${TZ_CHOICE:-9}
+    [[ "$TZ_CHOICE" =~ ^[0-9]$ ]] && break
+    warn "Введите число от 0 до 9."
+done
+case "$TZ_CHOICE" in
+    1) TIMEZONE="Europe/Moscow" ;;
+    2) TIMEZONE="Asia/Yekaterinburg" ;;
+    3) TIMEZONE="Asia/Novosibirsk" ;;
+    4) TIMEZONE="Asia/Vladivostok" ;;
+    5) TIMEZONE="Europe/Kiev" ;;
+    6) TIMEZONE="Asia/Almaty" ;;
+    7) TIMEZONE="Europe/Berlin" ;;
+    8) TIMEZONE="UTC" ;;
+    9) TIMEZONE="$SYS_TZ" ;;
+    0)
+        echo ""
+        echo -e "  Примеры: Europe/Moscow, Asia/Tokyo, America/New_York"
+        echo -e "  Полный список: timedatectl list-timezones"
+        echo ""
+        while true; do
+            read -p "  Введите часовой пояс: " TIMEZONE
+            TIMEZONE="${TIMEZONE// /}"
+            [[ -z "$TIMEZONE" ]] && warn "Пояс не может быть пустым." && continue
+            if timedatectl list-timezones 2>/dev/null | grep -qx "$TIMEZONE"; then
+                break
+            else
+                warn "Пояс '${TIMEZONE}' не найден. Проверьте написание."
+            fi
+        done
+        ;;
+esac
+timedatectl set-timezone "$TIMEZONE" 2>/dev/null || true
+printf "TIMEZONE=%s\n" "$TIMEZONE" >> "$CONF_FILE"
+info "Часовой пояс: ${TIMEZONE}"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ШАГ 11: СКРИПТ ОБНОВЛЕНИЯ
 # ══════════════════════════════════════════════════════════════════════════════
 log "Создаём update_proxy.sh..."
 cat > /root/update_proxy.sh << 'UPDATEEOF'
