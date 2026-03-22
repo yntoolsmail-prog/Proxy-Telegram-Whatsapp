@@ -290,6 +290,8 @@ async def show_wa_help(query):
         ]),
         parse_mode="Markdown"
     )
+
+async def show_mtp_menu(query):
     if not mtp_installed():
         await query.edit_message_text(
             "⚫ MTProxy не установлен.\n\n"
@@ -317,12 +319,12 @@ async def show_wa_help(query):
         f"_Telegram → Настройки → Данные → Тип соединения_",
         reply_markup=InlineKeyboardMarkup([
             [_toggle_btn(st["running"], "proxy_mtp_stop", "proxy_mtp_start"),
-             InlineKeyboardButton("🔄 Рестарт",           callback_data="proxy_mtp_restart")],
-            [InlineKeyboardButton("🔑 Сменить секрет",    callback_data="proxy_mtp_secret_ask")],
+             InlineKeyboardButton("🔄 Рестарт",             callback_data="proxy_mtp_restart")],
+            [InlineKeyboardButton("🔑 Сменить секрет",      callback_data="proxy_mtp_secret_ask")],
             [InlineKeyboardButton("📥 Обновить конфиги TG", callback_data="proxy_mtp_update_cfg")],
-            [InlineKeyboardButton("📖 Инструкция",        callback_data="proxy_mtp_help")],
-            [InlineKeyboardButton("🔄 Обновить",          callback_data="proxy_mtp_menu")],
-            [InlineKeyboardButton("◀️ Назад",             callback_data="proxy_menu")],
+            [InlineKeyboardButton("📖 Инструкция",          callback_data="proxy_mtp_help")],
+            [InlineKeyboardButton("🔄 Обновить",            callback_data="proxy_mtp_menu")],
+            [InlineKeyboardButton("◀️ Назад",               callback_data="proxy_menu")],
         ]),
         parse_mode="Markdown"
     )
