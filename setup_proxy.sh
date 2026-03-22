@@ -241,14 +241,24 @@ if [[ "$INSTALL_MTP" == "true" ]]; then
         || err "Не удалось скачать proxy-multi.conf."
 
     echo ""
+    # Если устанавливается вместе с WhatsApp — 443 занят, предлагаем 8443
+    if [[ "$INSTALL_WA" == "true" ]]; then
+        warn "WhatsApp прокси займёт порт 443 — для MTProxy используйте другой порт."
+        MTP_PORT_DEFAULT="8443"
+    else
+        MTP_PORT_DEFAULT="443"
+    fi
     while true; do
-        read -p "  Порт MTProxy [443]: " MTP_PORT
-        MTP_PORT=${MTP_PORT:-443}
+        read -p "  Порт MTProxy [${MTP_PORT_DEFAULT}]: " MTP_PORT
+        MTP_PORT=${MTP_PORT:-$MTP_PORT_DEFAULT}
         [[ "$MTP_PORT" =~ ^[0-9]+$ && "$MTP_PORT" -ge 1 && "$MTP_PORT" -le 65535 ]] && break
         warn "Введите корректный порт."
     done
+    if [[ "$INSTALL_WA" == "true" && "$MTP_PORT" == "443" ]]; then
+        err "Порт 443 зарезервирован для WhatsApp прокси. Выберите другой порт для MTProxy."
+    fi
     ss -tlnp 2>/dev/null | grep -q ":${MTP_PORT} " && \
-        warn "Порт ${MTP_PORT} занят! Проверьте после установки."
+        warn "Порт ${MTP_PORT} уже занят! Проверьте после установки."
 
     echo ""
     echo -e "  ${CYAN}${BOLD}Тип секрета (способ маскировки трафика)${NC}"
@@ -329,15 +339,6 @@ if [[ "$INSTALL_WA" == "true" ]]; then
         log "Docker установлен ✓"
     else
         warn "Docker уже установлен."
-    fi
-
-    # WhatsApp требует фиксированные порты 80, 443, 5222
-    # Порт 443 нельзя переназначать — клиент жёстко ожидает TLS на 443
-    if [[ "$INSTALL_MTP" == "true" && "$MTP_PORT" == "443" ]]; then
-        warn "MTProxy занимает порт 443 — WhatsApp прокси требует этот порт."
-        warn "Рекомендуется поменять порт MTProxy на другой (например 8443)."
-        read -p "  Продолжить всё равно? [y/N]: " WA_FORCE
-        [[ "${WA_FORCE,,}" != "y" ]] && { warn "WhatsApp прокси пропущен."; INSTALL_WA=false; }
     fi
 
     command -v ufw &>/dev/null && {
